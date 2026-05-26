@@ -118,6 +118,17 @@ function newId() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 
+function formatFileNames(files: File[]): string {
+  if (files.length === 0) return '未选择文件';
+  if (files.length === 1) return files[0].name;
+  if (files.length <= 3) return files.map((f) => f.name).join('、');
+  return `${files[0].name} 等 ${files.length} 个文件`;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 let groups: GroupState[] = [
   { id: newId(), name: '组 1', color: groupColors[0], enabled: true, files: [] },
 ];
@@ -323,6 +334,7 @@ function renderGroupList() {
   const rows = groups
     .map((g, idx) => {
       const fileCount = g.files.length;
+      const fileNames = escapeHtml(formatFileNames(g.files));
       const st = overlayStyleFromBaseColor(g.color);
       return `
         <div class="groupCard">
@@ -337,7 +349,11 @@ function renderGroupList() {
           </div>
           <div class="groupFilesRow">
             <div class="miniLabel">PNG</div>
-            <input data-act="pickFiles" data-id="${g.id}" type="file" accept="image/png" multiple />
+            <label class="filePicker">
+              <input class="fileInput" data-act="pickFiles" data-id="${g.id}" type="file" accept="image/png" multiple />
+              <span class="filePickerBtn">浏览…</span>
+              <span class="filePickerNames" title="${fileNames}">${fileNames}</span>
+            </label>
           </div>
         </div>
       `;
