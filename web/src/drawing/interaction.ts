@@ -307,11 +307,7 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
       if ((ann.kind === 'line' || ann.kind === 'arrow') && (s.kind === ann.kind)) {
         let px = x;
         let py = y;
-        if (shift && ann.kind === 'line') {
-          const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
-          const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
-          ({ x: px, y: py } = snapAngle8(ax, ay, x, y));
-        } else if (ann.kind === 'arrow') {
+        if (shift) {
           const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
           const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
           ({ x: px, y: py } = snapAngle8(ax, ay, x, y));

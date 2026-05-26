@@ -35,6 +35,8 @@ function drawArrowStartTickAndAngle(
   const g = arrowStartTickGeometry(x0, y0, x1, y1, lw);
   if (!g) return;
 
+  ctx.save();
+  ctx.globalAlpha = 0.6;
   ctx.beginPath();
   ctx.moveTo(x0, y0);
   ctx.lineTo(g.tx, g.ty);
@@ -43,6 +45,7 @@ function drawArrowStartTickAndAngle(
   ctx.beginPath();
   ctx.arc(x0, y0, g.arcR, g.arcStart, g.arcStart + g.arcSweep, g.arcSweep < 0);
   ctx.stroke();
+  ctx.restore();
 
   const deg = Math.round((g.acuteRad * 180) / Math.PI);
 

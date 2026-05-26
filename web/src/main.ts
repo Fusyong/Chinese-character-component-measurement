@@ -1136,15 +1136,20 @@ el.clear.addEventListener('click', () => {
   scheduleRecompute();
 });
 
+function exportFilename(base: string): string {
+  const ch = [...el.fontCharInput.value.trim()][0];
+  return ch ? `${ch}${base}` : base;
+}
+
 el.exportJSON.addEventListener('click', () => {
   if (!lastExport) return;
   const blob = new Blob([JSON.stringify(lastExport, null, 2)], { type: 'application/json;charset=utf-8' });
-  saveAs(blob, 'metrics.json');
+  saveAs(blob, exportFilename('metrics.json'));
 });
 
 el.exportPNG.addEventListener('click', () => {
   if (!lastAnnotatedBlob) return;
-  saveAs(lastAnnotatedBlob, 'annotated.png');
+  saveAs(lastAnnotatedBlob, exportFilename('annotated.png'));
 });
 
 function hexToRgb(hex: string) {
