@@ -1,11 +1,23 @@
 import './style.css';
 import { saveAs } from 'file-saver';
 import type { ExportPayload, Group, GroupResult, Metrics, Rect } from './types';
-import { buildMergedMaskFromFiles } from './mask';
+import { buildMergedMaskFromFiles, buildPerFileMasks, type PerFileMask } from './mask';
 import { computeBasicMetrics } from './metrics';
 import { computeBodyBBoxQuantile1d, computeBodyBBoxIntegral2d, verifyRectRatio } from './bodyRange';
 import { marchingSquaresContours, simplifyPolylineRDP } from './contour';
-import { clearCanvas, renderBoxUnderlays, renderCentroidOverlay, renderContourOverlay, renderGuidesUnderlay, renderMask } from './render';
+import { compositeExportBlob } from './drawing/composite';
+import {
+  attachDrawingInteraction,
+  redrawDrawingLayers,
+  setToolOptionsRefresh,
+  setupDrawingKeyboard,
+  syncToolButtons,
+} from './drawing/interaction';
+import type { DrawTool } from './drawing/types';
+import { mountPropsPanel } from './drawing/propsPanel';
+import { clearAnnotations, drawingState } from './drawing/store';
+import { fileKey } from './mask';
+import { renderGuideLayer, renderMeasureLayers, type MeasureRenderInput } from './renderPipeline';
 
 type BodyMethod = 'quantile1d' | 'integral2d';
 
@@ -211,11 +223,72 @@ appEl.innerHTML = `
     </div>
 
     <div class="canvasWrap">
-      <canvas id="cv"></canvas>
-      <canvas id="guideCv" class="guideCanvas"></canvas>
+      <canvas id="guideCv" class="layerCanvas layer0"></canvas>
+      <canvas id="drawUnderCv" class="layerCanvas layer1"></canvas>
+      <canvas id="measureCv" class="layerCanvas layer2"></canvas>
+      <canvas id="glyphCv" class="layerCanvas layer3"></canvas>
+      <canvas id="measureOverCv" class="layerCanvas layer4"></canvas>
+      <canvas id="drawTopCv" class="layerCanvas layer5"></canvas>
+      <canvas id="hitCv" class="hitLayer"></canvas>
     </div>
 
     <div class="panel" id="rightPanel">
+      <div class="drawToolbar" id="drawToolbar">
+        <h2>手动画图</h2>
+        <div class="toolGrid" id="toolGrid">
+        <button type="button" class="toolBtn" data-tool="strokeFill">笔画涂色</button>
+        <button type="button" class="toolBtn" data-tool="line">直线</button>
+        <button type="button" class="toolBtn" data-tool="arrow">箭头</button>
+        <button type="button" class="toolBtn" data-tool="rect">方框</button>
+        <button type="button" class="toolBtn" data-tool="square">方块</button>
+        <button type="button" class="toolBtn" data-tool="annularSector">扇形</button>
+        <button type="button" class="toolBtn" data-tool="equalSpacing">等距线</button>
+        <button type="button" class="toolBtn" data-tool="proportionScale">比例尺</button>
+        <button type="button" class="toolBtn" data-tool="crossMark">十字</button>
+        <button type="button" class="toolBtn" data-tool="copyCentroid">复制重心</button>
+        <button type="button" class="toolBtn" data-tool="copyBBox">复制外接框</button>
+        <button type="button" class="toolBtn" data-tool="copyBodyBBox">复制主体框</button>
+        <button type="button" class="toolBtn toolBtnFull active" data-tool="select">选择并调整图形</button>
+        </div>
+        <div class="toolOpts" id="toolOpts">
+          <p id="toolOptHint" class="toolOptHint" hidden></p>
+          <div id="drawStyleOpts" class="toolOptGroup">
+            <div class="row propRowColor"><label for="drawColor">图示颜色</label><input id="drawColor" class="propColorInput" type="color" value="#dc3c3c" /></div>
+            <div class="row"><label>线宽</label><input id="drawLw" type="range" min="1" max="6" step="0.5" value="2" /></div>
+            <div class="row"><label>新建图层</label>
+              <select id="drawLayer">
+                <option value="under">默认（字下）</option>
+                <option value="top">上层</option>
+              </select>
+            </div>
+          </div>
+          <div id="equalOpts" class="toolOptGroup" hidden>
+            <div class="row"><label>分隔线数</label><input id="eqCount" type="number" min="1" max="24" value="3" /></div>
+            <p class="toolOptHint" style="margin:4px 0 0">拖拽矩形：较长边定方向（竖→横线，横→竖线），较短边为线宽。</p>
+          </div>
+          <div id="proportionOpts" class="toolOptGroup" hidden>
+            <div class="row"><label>分隔线数</label><input id="propDivCount" type="number" min="2" max="24" value="3" /></div>
+            <p class="toolOptHint" style="margin:4px 0 0">默认各段等比例；拖拽后可拖中间分割线微调。</p>
+          </div>
+          <div id="crossOpts" class="toolOptGroup" hidden>
+            <div class="row"><label>大小</label><input id="crossSize" type="number" min="4" max="200" value="40" /></div>
+            <p class="toolOptHint" style="margin:4px 0 0">点击画布放置十字，大小与拖拽无关。</p>
+          </div>
+          <div id="strokeOpts" class="toolOptGroup" hidden>
+            <div class="row propRowColor"><label for="strokeColor">涂色</label><input id="strokeColor" class="propColorInput" type="color" value="#ff6b6b" /></div>
+            <div class="row"><label>涂色层</label>
+              <select id="strokeLayer"><option value="under">默认（字下）</option><option value="top" selected>上层</option></select>
+            </div>
+          </div>
+        </div>
+        <div class="btns">
+          <button type="button" id="clearDrawings">清空图示</button>
+        </div>
+        <div class="annProps" id="annProps">
+          <h3>选中参数</h3>
+          <div id="annPropsBody"></div>
+        </div>
+      </div>
       <h2>状态</h2>
       <div id="statusPanel">
         <div class="kv"><div>状态</div><div><code id="status">未选择文件</code></div></div>
@@ -258,8 +331,29 @@ const el = {
   status: document.querySelector<HTMLElement>('#status')!,
   dim: document.querySelector<HTMLElement>('#dim')!,
   metrics: document.querySelector<HTMLElement>('#metrics')!,
-  canvas: document.querySelector<HTMLCanvasElement>('#cv')!,
   guideCanvas: document.querySelector<HTMLCanvasElement>('#guideCv')!,
+  drawUnderCanvas: document.querySelector<HTMLCanvasElement>('#drawUnderCv')!,
+  measureCanvas: document.querySelector<HTMLCanvasElement>('#measureCv')!,
+  glyphCanvas: document.querySelector<HTMLCanvasElement>('#glyphCv')!,
+  measureOverCanvas: document.querySelector<HTMLCanvasElement>('#measureOverCv')!,
+  drawTopCanvas: document.querySelector<HTMLCanvasElement>('#drawTopCv')!,
+  hitCanvas: document.querySelector<HTMLCanvasElement>('#hitCv')!,
+  drawColor: document.querySelector<HTMLInputElement>('#drawColor')!,
+  drawLw: document.querySelector<HTMLInputElement>('#drawLw')!,
+  drawLayer: document.querySelector<HTMLSelectElement>('#drawLayer')!,
+  toolOptHint: document.querySelector<HTMLElement>('#toolOptHint')!,
+  drawStyleOpts: document.querySelector<HTMLElement>('#drawStyleOpts')!,
+  equalOpts: document.querySelector<HTMLElement>('#equalOpts')!,
+  proportionOpts: document.querySelector<HTMLElement>('#proportionOpts')!,
+  propDivCount: document.querySelector<HTMLInputElement>('#propDivCount')!,
+  eqCount: document.querySelector<HTMLInputElement>('#eqCount')!,
+  strokeOpts: document.querySelector<HTMLElement>('#strokeOpts')!,
+  crossOpts: document.querySelector<HTMLElement>('#crossOpts')!,
+  crossSize: document.querySelector<HTMLInputElement>('#crossSize')!,
+  strokeColor: document.querySelector<HTMLInputElement>('#strokeColor')!,
+  strokeLayer: document.querySelector<HTMLSelectElement>('#strokeLayer')!,
+  clearDrawings: document.querySelector<HTMLButtonElement>('#clearDrawings')!,
+  annPropsBody: document.querySelector<HTMLDivElement>('#annPropsBody')!,
 };
 
 function setWarn(msg: string) {
@@ -301,6 +395,119 @@ function updateControlsFromState() {
 
 let lastExport: ExportPayload | null = null;
 let lastAnnotatedBlob: Blob | null = null;
+
+type GroupPerFileCache = {
+  groupId: string;
+  enabled: boolean;
+  perFile: PerFileMask[];
+};
+
+let lastPerFileMasks: GroupPerFileCache[] = [];
+let canvasSize = { w: 0, h: 0 };
+
+function setAllCanvasSize(w: number, h: number) {
+  canvasSize = { w, h };
+  for (const cv of [
+    el.guideCanvas,
+    el.drawUnderCanvas,
+    el.measureCanvas,
+    el.glyphCanvas,
+    el.measureOverCanvas,
+    el.drawTopCanvas,
+    el.hitCanvas,
+  ]) {
+    cv.width = w;
+    cv.height = h;
+  }
+}
+
+function clearAllLayers() {
+  for (const cv of [
+    el.guideCanvas,
+    el.drawUnderCanvas,
+    el.measureCanvas,
+    el.glyphCanvas,
+    el.measureOverCanvas,
+    el.drawTopCanvas,
+  ]) {
+    const ctx = cv.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, cv.width, cv.height);
+  }
+}
+
+async function refreshExportBlob() {
+  if (canvasSize.w <= 0) {
+    lastAnnotatedBlob = null;
+    return;
+  }
+  lastAnnotatedBlob = await compositeExportBlob({
+    drawUnder: el.drawUnderCanvas,
+    measure: el.measureCanvas,
+    glyph: el.glyphCanvas,
+    measureOver: el.measureOverCanvas,
+    drawTop: el.drawTopCanvas,
+  });
+}
+
+function interactionCtx() {
+  return {
+    width: canvasSize.w,
+    height: canvasSize.h,
+    canvases: {
+      drawUnder: el.drawUnderCanvas,
+      drawTop: el.drawTopCanvas,
+      hit: el.hitCanvas,
+    },
+    getPerFileMasks: () =>
+      lastPerFileMasks.flatMap((g) =>
+        g.perFile.map((pf) => ({
+          fileKey: pf.fileKey,
+          groupId: g.groupId,
+          mask: pf.mask.mask,
+          enabled: g.enabled,
+        }))
+      ),
+    getMetricsForCopy: () => ({
+      overall: lastExport
+        ? {
+            metrics: lastExport.overall,
+            color: overallBaseColor,
+            show: state.showOverallOverlays,
+          }
+        : undefined,
+      groups:
+        lastExport?.groups.map((gr) => ({
+          id: gr.group.id,
+          metrics: gr.metrics,
+          color: gr.group.color,
+          enabled: gr.group.enabled && state.showGroupOverlays,
+        })) ?? [],
+    }),
+    centroidRadii: (m: Metrics) => centroidEllipseRadiiPx(m, state.centroidAreaK),
+    onExportRefresh: () => void refreshExportBlob(),
+    onSelectionChange: () => refreshPropsPanel(),
+  };
+}
+
+function fileLabelForKey(key: string): string {
+  for (const g of groups) {
+    for (const f of g.files) {
+      if (fileKey(f) === key) return f.name;
+    }
+  }
+  return key.split(':')[0] ?? key;
+}
+
+let refreshPropsPanel: () => void = () => {};
+
+function redrawCanvasOnly() {
+  if (canvasSize.w > 0) redrawDrawingLayers(interactionCtx());
+}
+
+function redrawAll() {
+  redrawCanvasOnly();
+  refreshPropsPanel();
+}
 
 function renderMetricsPanel(payload: ExportPayload | null) {
   if (!payload) {
@@ -373,10 +580,8 @@ async function recomputeAndRender() {
     lastExport = null;
     lastAnnotatedBlob = null;
     renderMetricsPanel(null);
-    const ctx = el.canvas.getContext('2d');
-    if (ctx) ctx.clearRect(0, 0, el.canvas.width, el.canvas.height);
-    const gctx = el.guideCanvas.getContext('2d');
-    if (gctx) gctx.clearRect(0, 0, el.guideCanvas.width, el.guideCanvas.height);
+    lastPerFileMasks = [];
+    clearAllLayers();
     el.exportJSON.disabled = true;
     el.exportPNG.disabled = true;
     return;
@@ -385,12 +590,20 @@ async function recomputeAndRender() {
   const totalFiles = groupsWithFiles.reduce((acc, g) => acc + g.files.length, 0);
   el.status.textContent = `处理中：${groupsWithFiles.length} 组 / ${totalFiles} 个文件`;
 
+  const maskOpts = { threshold: state.threshold, invert: state.invert };
   const groupMerged = await Promise.all(
     groupsWithFiles.map(async (g) => ({
       group: g,
-      merged: await buildMergedMaskFromFiles(g.files, { threshold: state.threshold, invert: state.invert }),
+      merged: await buildMergedMaskFromFiles(g.files, maskOpts),
+      perFile: await buildPerFileMasks(g.files, maskOpts),
     }))
   );
+
+  lastPerFileMasks = groupMerged.map((gm) => ({
+    groupId: gm.group.id,
+    enabled: gm.group.enabled,
+    perFile: gm.perFile,
+  }));
 
   // Determine canvas size from the first non-empty group.
   const firstNonEmpty = groupMerged.find((x) => x.merged.width > 0 && x.merged.height > 0);
@@ -421,18 +634,13 @@ async function recomputeAndRender() {
 
   const overallMerged = { width: W, height: H, mask: overallMask, binarizeMode: overallBinarizeMode } as const;
 
-  el.canvas.width = W;
-  el.canvas.height = H;
+  setAllCanvasSize(W, H);
   el.dim.textContent = `${W}×${H}`;
 
-  // Guides (crosshair) are part of the UI, always visible, not exported.
-  el.guideCanvas.width = W;
-  el.guideCanvas.height = H;
   const gctx = el.guideCanvas.getContext('2d');
   if (gctx) {
-    gctx.clearRect(0, 0, W, H);
-    const guideStyle = guideStyleFromCanvasBorder(el.canvas);
-    renderGuidesUnderlay(gctx, W, H, guideStyle);
+    const guideStyle = guideStyleFromCanvasBorder(el.glyphCanvas);
+    renderGuideLayer(gctx, W, H, guideStyle);
   }
 
   const overallBasic = computeBasicMetrics(overallMerged.mask, W, H);
@@ -553,9 +761,6 @@ async function recomputeAndRender() {
 
   lastExport = payload;
 
-  const ctx = el.canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas 2D not available');
-
   const overlayOpts = {
     showBBox: state.showBBox,
     showBodyBBox: state.showBodyBBox,
@@ -563,46 +768,32 @@ async function recomputeAndRender() {
     showContours: state.showContours,
   };
 
-  // Layering requirement:
-  // - All lines (guides, bbox/body/contours) under the image.
-  // - Only centroid markers above the image.
-  clearCanvas(ctx, W, H);
+  const measureInput: MeasureRenderInput = {
+    width: W,
+    height: H,
+    overallMerged,
+    overallMetrics,
+    groupResults,
+    overlayOpts,
+    showOverallOverlays: state.showOverallOverlays,
+    showGroupOverlays: state.showGroupOverlays,
+    overallStyle: overlayStyleFromBaseColor(overallBaseColor),
+    groupStyle: (color) => overlayStyleFromBaseColor(color),
+    centroidRadii: (m) => centroidEllipseRadiiPx(m, state.centroidAreaK),
+  };
 
-  const overallStyle = overlayStyleFromBaseColor(overallBaseColor);
+  renderMeasureLayers(
+    {
+      guide: null,
+      measure: el.measureCanvas.getContext('2d'),
+      glyph: el.glyphCanvas.getContext('2d', { willReadFrequently: true }),
+      measureOver: el.measureOverCanvas.getContext('2d'),
+    },
+    measureInput
+  );
 
-  // Underlays: overall first, then groups (if toggled on)
-  if (state.showOverallOverlays) {
-    renderBoxUnderlays(ctx, overallMetrics, overlayOpts, overallStyle);
-  }
-  if (state.showGroupOverlays) {
-    for (const gr of groupResults) {
-      if (!gr.group.enabled) continue; // per-group toggle only controls overlay visibility
-      const st = overlayStyleFromBaseColor(gr.group.color);
-      renderBoxUnderlays(ctx, gr.metrics, overlayOpts, st);
-    }
-  }
-
-  // Image
-  renderMask(ctx, overallMerged);
-
-  // Overlays: contours + centroids (overall first, then groups if toggled on)
-  if (state.showOverallOverlays) {
-    renderContourOverlay(ctx, overallMetrics, overlayOpts, overallStyle);
-    renderCentroidOverlay(ctx, overallMetrics, overlayOpts, overallStyle, centroidEllipseRadiiPx(overallMetrics, state.centroidAreaK));
-  }
-  if (state.showGroupOverlays) {
-    for (const gr of groupResults) {
-      const st = overlayStyleFromBaseColor(gr.group.color);
-      // Group toggle does NOT control contour visibility.
-      renderContourOverlay(ctx, gr.metrics, overlayOpts, st);
-      // Group toggle still controls centroid visibility.
-      if (gr.group.enabled) {
-        renderCentroidOverlay(ctx, gr.metrics, overlayOpts, st, centroidEllipseRadiiPx(gr.metrics, state.centroidAreaK));
-      }
-    }
-  }
-
-  lastAnnotatedBlob = await new Promise<Blob>((resolve) => el.canvas.toBlob((b) => resolve(b ?? new Blob()), 'image/png'));
+  redrawAll();
+  await refreshExportBlob();
 
   el.status.textContent = `完成：${groupsWithFiles.length} 组 / ${totalFiles} 个文件`;
   renderMetricsPanel(payload);
@@ -792,4 +983,109 @@ el.exportPNG.addEventListener('click', () => {
   if (!lastAnnotatedBlob) return;
   saveAs(lastAnnotatedBlob, 'annotated.png');
 });
+
+function hexToRgb(hex: string) {
+  const h = hex.replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function updateDrawStyleFromUI() {
+  const c = hexToRgb(el.drawColor.value);
+  drawingState.drawStyle = {
+    color: `rgb(${c.r}, ${c.g}, ${c.b})`,
+    lineWidth: Number(el.drawLw.value),
+  };
+}
+
+const DRAW_SHAPE_TOOLS = new Set<DrawTool>([
+  'line',
+  'rect',
+  'square',
+  'arrow',
+  'equalSpacing',
+  'proportionScale',
+  'annularSector',
+  'crossMark',
+]);
+
+const TOOL_HINTS: Partial<Record<DrawTool, string>> = {
+  select: '点击图示选中；拖拽移动。Delete 删除，Shift 约束方向。',
+  line: '拖拽画直线；按住 Shift 八向吸附。',
+  arrow: '拖拽画箭头：起点横/竖短线（贴主方向一侧）标锐角；末端三角箭头。Shift 八向吸附。',
+  strokeFill: '点击笔画涂色；Ctrl+点击已涂色笔画可移除。',
+  copyCentroid: '点击画布，将当前可见的整体/组重心复制到上层。',
+  copyBBox: '点击画布，将当前可见的整体/组外接框复制到上层。',
+  copyBodyBBox: '点击画布，将当前可见的整体/组主体框复制到上层。',
+  annularSector: '点击放置扇形；拖拽圆心、内外圆上四点调整。默认内圆 r100、外圆 r300、左下四分之一环。',
+  equalSpacing: '设分隔线数后拖拽矩形；沿较长边等分，分隔线横跨较短边。',
+  proportionScale: '设分隔线数后拖拽；八向吸附，默认等比例，标注实际格宽。',
+  crossMark: '点击放置十字；大小由工具选项设定，与拖拽无关。',
+};
+
+function updateToolOptionPanels() {
+  const t = drawingState.activeTool;
+
+  el.drawStyleOpts.hidden = !DRAW_SHAPE_TOOLS.has(t);
+  el.equalOpts.hidden = t !== 'equalSpacing';
+  el.proportionOpts.hidden = t !== 'proportionScale';
+  el.crossOpts.hidden = t !== 'crossMark';
+  el.strokeOpts.hidden = t !== 'strokeFill';
+
+  const hint = TOOL_HINTS[t];
+  if (hint) {
+    el.toolOptHint.hidden = false;
+    el.toolOptHint.textContent = hint;
+  } else {
+    el.toolOptHint.hidden = true;
+    el.toolOptHint.textContent = '';
+  }
+}
+
+document.querySelectorAll('[data-tool]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const tool = (btn as HTMLElement).dataset.tool as import('./drawing/types').DrawTool;
+    drawingState.activeTool = tool;
+    syncToolButtons();
+  });
+});
+
+el.drawColor.addEventListener('input', updateDrawStyleFromUI);
+el.drawLw.addEventListener('input', updateDrawStyleFromUI);
+el.drawLayer.addEventListener('change', () => {
+  drawingState.defaultLayer = el.drawLayer.value as 'under' | 'top';
+});
+el.eqCount.addEventListener('change', () => {
+  drawingState.equalSpacingCount = Math.max(1, Number(el.eqCount.value) || 3);
+});
+el.propDivCount.addEventListener('change', () => {
+  drawingState.proportionDividerCount = Math.max(2, Number(el.propDivCount.value) || 3);
+});
+el.crossSize.addEventListener('change', () => {
+  drawingState.crossMarkSize = Math.max(4, Number(el.crossSize.value) || 40);
+});
+el.strokeColor.addEventListener('input', () => {
+  const c = hexToRgb(el.strokeColor.value);
+  drawingState.strokeFillColor = `rgba(${c.r}, ${c.g}, ${c.b}, 0.45)`;
+});
+el.strokeLayer.addEventListener('change', () => {
+  drawingState.strokeFillLayer = el.strokeLayer.value as 'under' | 'top';
+});
+el.clearDrawings.addEventListener('click', () => {
+  clearAnnotations();
+  redrawAll();
+});
+
+updateDrawStyleFromUI();
+updateToolOptionPanels();
+setToolOptionsRefresh(updateToolOptionPanels);
+
+refreshPropsPanel = mountPropsPanel(el.annPropsBody, {
+  getCanvasWidth: () => canvasSize.w,
+  getFileLabel: fileLabelForKey,
+  onRedraw: () => redrawCanvasOnly(),
+});
+
+attachDrawingInteraction(() => interactionCtx());
+setupDrawingKeyboard(() => redrawAll());
 

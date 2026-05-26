@@ -1,0 +1,548 @@
+import type { Metrics } from '../types';
+import { copyFrameAnnotations } from './copyFrames';
+import { angleOnCircle, ANNULAR_DEFAULT_A0, ANNULAR_DEFAULT_A1, constrainAxis, dist, moveAnnotation, rectFromDrag, snapAngle8, squareCornerFromAnchor } from './geom';
+import { equalSpacingOrientationFromDrag } from './equalSpacingTemplate';
+import {
+  clampSplitT,
+  effectiveProportionRatios,
+  equalProportionRatios,
+  paramOnProportionLine,
+  proportionSplitT,
+  ratiosFromSplitT,
+} from './proportionScale';
+import { hitTestAnnotations, hitTestStrokeMask } from './hitTest';
+import { renderAnnotation, renderAnnotations, renderSelectionHandles, renderStrokeFills } from './render';
+import {
+  addAnnotation,
+  beginEdit,
+  currentDrawStyle,
+  drawingState,
+  newAnnId,
+  redo,
+  removeSelected,
+  removeStrokeFill,
+  setStrokeFill,
+  undo,
+  updateAnnotation,
+} from './store';
+import type { Annotation, DrawTool } from './types';
+
+export type InteractionContext = {
+  width: number;
+  height: number;
+  canvases: {
+    drawUnder: HTMLCanvasElement;
+    drawTop: HTMLCanvasElement;
+    hit: HTMLCanvasElement;
+  };
+  getPerFileMasks: () => { fileKey: string; groupId: string; mask: Uint8Array; enabled: boolean }[];
+  getMetricsForCopy: () => {
+    overall?: { metrics: Metrics; color: string; show: boolean };
+    groups: { id: string; metrics: Metrics; color: string; enabled: boolean }[];
+  };
+  centroidRadii: (m: Metrics) => { rx: number; ry: number };
+  onExportRefresh: () => void;
+  onSelectionChange?: () => void;
+};
+
+type DragState =
+  | { kind: 'none' }
+  | { kind: 'create'; tool: DrawTool; x0: number; y0: number; preview: Partial<Annotation> | null }
+  | { kind: 'move'; annId: string; ox: number; oy: number; bases: Map<string, Annotation> }
+  | { kind: 'handle'; annId: string; handle: string; startAnn: Annotation };
+
+let drag: DragState = { kind: 'none' };
+let previewAnn: Annotation | null = null;
+
+function canvasPoint(cv: HTMLCanvasElement, ev: PointerEvent) {
+  const rect = cv.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
+  const sx = cv.width > 0 ? cv.width / rect.width : 1;
+  const sy = cv.height > 0 ? cv.height / rect.height : 1;
+  return { x: (ev.clientX - rect.left) * sx, y: (ev.clientY - rect.top) * sy };
+}
+
+function maskMap(ctx: InteractionContext): Map<string, Uint8Array> {
+  const m = new Map<string, Uint8Array>();
+  for (const item of ctx.getPerFileMasks()) {
+    if (item.enabled) m.set(item.fileKey, item.mask);
+  }
+  return m;
+}
+
+export function redrawDrawingLayers(ctx: InteractionContext) {
+  const W = ctx.width;
+  const H = ctx.height;
+  const uctx = ctx.canvases.drawUnder.getContext('2d', { willReadFrequently: true });
+  const tctx = ctx.canvases.drawTop.getContext('2d', { willReadFrequently: true });
+  if (!uctx || !tctx) return;
+
+  uctx.clearRect(0, 0, W, H);
+  tctx.clearRect(0, 0, W, H);
+
+  const masks = maskMap(ctx);
+  renderStrokeFills(uctx, drawingState.strokeFills, 'under', W, H, masks);
+  renderStrokeFills(tctx, drawingState.strokeFills, 'top', W, H, masks);
+
+  renderAnnotations(uctx, drawingState.annotations, 'under', W, drawingState.selectedIds);
+  renderAnnotations(tctx, drawingState.annotations, 'top', W, drawingState.selectedIds);
+
+  if (previewAnn) {
+    const pctx = previewAnn.layer === 'under' ? uctx : tctx;
+    renderAnnotation(pctx, previewAnn, W, false);
+  }
+
+  for (const id of drawingState.selectedIds) {
+    const ann = drawingState.annotations.find((a) => a.id === id);
+    if (!ann) continue;
+    renderSelectionHandles(ann.layer === 'under' ? uctx : tctx, ann, W);
+  }
+
+  ctx.onExportRefresh();
+}
+
+function defaultLayer() {
+  return drawingState.defaultLayer;
+}
+
+function notifySelection(ctx: InteractionContext) {
+  ctx.onSelectionChange?.();
+}
+
+type ShiftConstraint = 'axis' | 'snap8';
+
+function endPoint(x0: number, y0: number, x1: number, y1: number, shift: boolean, shiftConstraint: ShiftConstraint = 'axis') {
+  if (shift && shiftConstraint === 'snap8') return snapAngle8(x0, y0, x1, y1);
+  if (shift && shiftConstraint === 'axis') return constrainAxis(x0, y0, x1, y1, true);
+  return { x: x1, y: y1 };
+}
+
+export function attachDrawingInteraction(getCtx: () => InteractionContext) {
+  const hit = getCtx().canvases.hit;
+
+  hit.addEventListener('pointerdown', (ev) => {
+    const ctx = getCtx();
+    if (ctx.width <= 0 || ctx.height <= 0) return;
+    hit.setPointerCapture(ev.pointerId);
+    const { x, y } = canvasPoint(hit, ev);
+    const tool = drawingState.activeTool;
+    previewAnn = null;
+
+    if (tool === 'strokeFill') {
+      const masks = ctx.getPerFileMasks().filter((m) => m.enabled);
+      const key = hitTestStrokeMask(x, y, ctx.width, ctx.height, masks);
+      if (!key) return;
+      const item = masks.find((m) => m.fileKey === key);
+      const hasFill = drawingState.strokeFills.some((s) => s.fileKey === key);
+      drawingState.selectedIds = new Set();
+
+      if (ev.ctrlKey || ev.metaKey) {
+        if (hasFill) {
+          removeStrokeFill(key);
+          drawingState.selectedStrokeKeys.delete(key);
+        } else {
+          drawingState.selectedStrokeKeys.add(key);
+          if (item) setStrokeFill(key, item.groupId, drawingState.strokeFillColor, drawingState.strokeFillLayer);
+        }
+      } else {
+        drawingState.selectedStrokeKeys = new Set([key]);
+        if (item) setStrokeFill(key, item.groupId, drawingState.strokeFillColor, drawingState.strokeFillLayer);
+      }
+
+      redrawDrawingLayers(ctx);
+      notifySelection(ctx);
+      return;
+    }
+
+    if (tool === 'copyCentroid') {
+      const data = ctx.getMetricsForCopy();
+      const style = currentDrawStyle();
+      if (data.overall?.show && data.overall.metrics.centroid) {
+        const r = ctx.centroidRadii(data.overall.metrics);
+        addAnnotation({
+          kind: 'centroidCopy',
+          id: newAnnId(),
+          layer: 'top',
+          style,
+          x: data.overall.metrics.centroid.x,
+          y: data.overall.metrics.centroid.y,
+          rx: r.rx,
+          ry: r.ry,
+          color: data.overall.color,
+        });
+      }
+      for (const g of data.groups) {
+        if (!g.enabled || !g.metrics.centroid) continue;
+        const r = ctx.centroidRadii(g.metrics);
+        addAnnotation({
+          kind: 'centroidCopy',
+          id: newAnnId(),
+          layer: 'top',
+          style,
+          x: g.metrics.centroid.x,
+          y: g.metrics.centroid.y,
+          rx: r.rx,
+          ry: r.ry,
+          color: g.color,
+        });
+      }
+      redrawDrawingLayers(ctx);
+      notifySelection(ctx);
+      return;
+    }
+
+    if (tool === 'copyBBox' || tool === 'copyBodyBBox') {
+      const data = ctx.getMetricsForCopy();
+      const style = currentDrawStyle();
+      const kind = tool === 'copyBBox' ? 'bboxCopy' : 'bodyBBoxCopy';
+      const rectOf =
+        kind === 'bboxCopy'
+          ? (m: Metrics) => m.bbox
+          : (m: Metrics) => m.bodyBBox?.rect;
+      copyFrameAnnotations(data, kind, rectOf, style);
+      redrawDrawingLayers(ctx);
+      notifySelection(ctx);
+      return;
+    }
+
+    if (tool === 'select') {
+      const hitR = hitTestAnnotations(x, y, drawingState.annotations, ctx.width);
+      if (hitR.kind === 'handle') {
+        const ann = drawingState.annotations.find((a) => a.id === hitR.annId)!;
+        beginEdit();
+        drag = { kind: 'handle', annId: hitR.annId, handle: hitR.handle, startAnn: structuredClone(ann) };
+        if (!drawingState.selectedIds.has(hitR.annId)) drawingState.selectedIds = new Set([hitR.annId]);
+        notifySelection(ctx);
+        return;
+      }
+      if (hitR.kind === 'move') {
+        const bases = new Map<string, Annotation>();
+        const ids = ev.shiftKey && drawingState.selectedIds.has(hitR.annId) ? drawingState.selectedIds : new Set([hitR.annId]);
+        if (!ev.shiftKey) {
+          drawingState.selectedIds = ids;
+          drawingState.selectedStrokeKeys = new Set();
+        }
+        for (const id of ids) {
+          const a = drawingState.annotations.find((an) => an.id === id);
+          if (a) bases.set(id, structuredClone(a));
+        }
+        beginEdit();
+        drag = { kind: 'move', annId: hitR.annId, ox: x, oy: y, bases };
+        notifySelection(ctx);
+        return;
+      }
+      drawingState.selectedIds = new Set();
+      drawingState.selectedStrokeKeys = new Set();
+      redrawDrawingLayers(ctx);
+      notifySelection(ctx);
+      return;
+    }
+
+    if (tool === 'crossMark') {
+      const style = currentDrawStyle();
+      const layer = defaultLayer();
+      addAnnotation({
+        kind: 'crossMark',
+        id: newAnnId(),
+        x,
+        y,
+        size: drawingState.crossMarkSize,
+        layer,
+        style,
+      });
+      drag = { kind: 'none' };
+      redrawDrawingLayers(ctx);
+      notifySelection(ctx);
+      return;
+    }
+
+    if (tool === 'annularSector') {
+      const style = currentDrawStyle();
+      const layer = defaultLayer();
+      addAnnotation({
+        kind: 'annularSector',
+        id: newAnnId(),
+        cx: x,
+        cy: y,
+        rInner: drawingState.annularInnerR,
+        rOuter: drawingState.annularOuterR,
+        a0: ANNULAR_DEFAULT_A0,
+        a1: ANNULAR_DEFAULT_A1,
+        layer,
+        style,
+      });
+      drag = { kind: 'none' };
+      redrawDrawingLayers(ctx);
+      notifySelection(ctx);
+      return;
+    }
+
+    drag = { kind: 'create', tool, x0: x, y0: y, preview: null };
+  });
+
+  hit.addEventListener('pointermove', (ev) => {
+    const ctx = getCtx();
+    if (ctx.width <= 0 || ctx.height <= 0) return;
+    const { x, y } = canvasPoint(hit, ev);
+    const style = currentDrawStyle();
+    const layer = defaultLayer();
+    const shift = ev.shiftKey;
+
+    if (drag.kind === 'move') {
+      const dx = x - drag.ox;
+      const dy = y - drag.oy;
+      for (const [id, base] of drag.bases) {
+        updateAnnotation(id, moveAnnotation(base, dx, dy));
+      }
+      previewAnn = null;
+      redrawDrawingLayers(ctx);
+      return;
+    }
+
+    if (drag.kind === 'handle') {
+      const hd = drag;
+      const ann = drawingState.annotations.find((a) => a.id === hd.annId);
+      const s = hd.startAnn;
+      if (!ann) return;
+      if ((ann.kind === 'line' || ann.kind === 'arrow') && (s.kind === ann.kind)) {
+        let px = x;
+        let py = y;
+        if (shift && ann.kind === 'line') {
+          const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
+          const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
+          ({ x: px, y: py } = snapAngle8(ax, ay, x, y));
+        } else if (ann.kind === 'arrow') {
+          const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
+          const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
+          ({ x: px, y: py } = snapAngle8(ax, ay, x, y));
+        }
+        if (hd.handle === 'p0') updateAnnotation(ann.id, { x0: px, y0: py });
+        else updateAnnotation(ann.id, { x1: px, y1: py });
+      } else if (ann.kind === 'proportionScale' && s.kind === 'proportionScale') {
+        if (hd.handle.startsWith('split:')) {
+          const idx = Number(hd.handle.slice(6));
+          const ratios = effectiveProportionRatios(ann.count, ann.ratios);
+          const splits = proportionSplitT(ratios);
+          if (idx >= 0 && idx < splits.length) {
+            let t = paramOnProportionLine(ann.x0, ann.y0, ann.x1, ann.y1, x, y);
+            t = clampSplitT(splits, idx, t);
+            const next = [...splits];
+            next[idx] = t;
+            updateAnnotation(ann.id, { ratios: ratiosFromSplitT(next) });
+          }
+        } else if (hd.handle === 'p0' || hd.handle === 'p1') {
+          const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
+          const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
+          const { x: px, y: py } = snapAngle8(ax, ay, x, y);
+          if (hd.handle === 'p0') updateAnnotation(ann.id, { x0: px, y0: py });
+          else updateAnnotation(ann.id, { x1: px, y1: py });
+        }
+      } else if (
+        (ann.kind === 'rect' || ann.kind === 'square' || ann.kind === 'bboxCopy' || ann.kind === 'bodyBBoxCopy') &&
+        s.kind === ann.kind
+      ) {
+        if (shift) {
+          const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
+          const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
+          const c = squareCornerFromAnchor(ax, ay, x, y);
+          if (hd.handle === 'p0') updateAnnotation(ann.id, { x0: c.x, y0: c.y });
+          else updateAnnotation(ann.id, { x1: c.x, y1: c.y });
+        } else if (hd.handle === 'p0') updateAnnotation(ann.id, { x0: x, y0: y });
+        else updateAnnotation(ann.id, { x1: x, y1: y });
+      } else if (ann.kind === 'equalSpacing' && s.kind === 'equalSpacing') {
+        const patch =
+          hd.handle === 'p0'
+            ? { x0: x, y0: y, orientation: equalSpacingOrientationFromDrag(x, y, ann.x1, ann.y1) }
+            : { x1: x, y1: y, orientation: equalSpacingOrientationFromDrag(ann.x0, ann.y0, x, y) };
+        updateAnnotation(ann.id, patch);
+      } else if (ann.kind === 'crossMark') {
+        updateAnnotation(ann.id, { size: Math.max(dist(ann.x, ann.y, x, y) * 2, 8) });
+      } else if (ann.kind === 'annularSector' && s.kind === 'annularSector') {
+        const ang = angleOnCircle(ann.cx, ann.cy, x, y);
+        const r = Math.max(dist(ann.cx, ann.cy, x, y), 4);
+        if (hd.handle === 'c') {
+          updateAnnotation(ann.id, { cx: x, cy: y });
+        } else if (hd.handle === 'is') {
+          updateAnnotation(ann.id, { a0: ang, rInner: Math.min(r, ann.rOuter - 4) });
+        } else if (hd.handle === 'ie') {
+          updateAnnotation(ann.id, { a1: ang, rInner: Math.min(r, ann.rOuter - 4) });
+        } else if (hd.handle === 'os') {
+          updateAnnotation(ann.id, { a0: ang, rOuter: Math.max(r, ann.rInner + 4) });
+        } else if (hd.handle === 'oe') {
+          updateAnnotation(ann.id, { a1: ang, rOuter: Math.max(r, ann.rInner + 4) });
+        }
+      }
+      previewAnn = null;
+      redrawDrawingLayers(ctx);
+      return;
+    }
+
+    if (drag.kind !== 'create') return;
+
+    const { x0, y0, tool } = drag;
+
+    if (tool === 'line') {
+      const p = endPoint(x0, y0, x, y, shift, 'snap8');
+      previewAnn = { kind: 'line', id: '__p', x0, y0, x1: p.x, y1: p.y, layer, style } as Annotation;
+    } else if (tool === 'rect') {
+      const r = rectFromDrag(x0, y0, x, y, shift);
+      previewAnn = { kind: 'rect', id: '__p', ...r, layer, style } as Annotation;
+    } else if (tool === 'square') {
+      const r = rectFromDrag(x0, y0, x, y, shift);
+      previewAnn = { kind: 'square', id: '__p', ...r, layer, style } as Annotation;
+    } else if (tool === 'arrow') {
+      const p = endPoint(x0, y0, x, y, shift, 'snap8');
+      previewAnn = { kind: 'arrow', id: '__p', x0, y0, x1: p.x, y1: p.y, layer, style } as Annotation;
+    } else if (tool === 'equalSpacing') {
+      previewAnn = {
+        kind: 'equalSpacing',
+        id: '__p',
+        orientation: equalSpacingOrientationFromDrag(x0, y0, x, y),
+        count: drawingState.equalSpacingCount,
+        x0,
+        y0,
+        x1: x,
+        y1: y,
+        layer,
+        style,
+      } as Annotation;
+    } else if (tool === 'proportionScale') {
+      const divCount = drawingState.proportionDividerCount;
+      const p = snapAngle8(x0, y0, x, y);
+      previewAnn = {
+        kind: 'proportionScale',
+        id: '__p',
+        x0,
+        y0,
+        x1: p.x,
+        y1: p.y,
+        count: divCount,
+        ratios: equalProportionRatios(divCount),
+        layer,
+        style,
+      } as Annotation;
+    }
+
+    redrawDrawingLayers(ctx);
+  });
+
+  hit.addEventListener('pointerup', (ev) => {
+    const ctx = getCtx();
+    if (ctx.width <= 0 || ctx.height <= 0) return;
+    const { x, y } = canvasPoint(hit, ev);
+    const style = currentDrawStyle();
+    const layer = defaultLayer();
+
+    if (drag.kind === 'move' || drag.kind === 'handle') {
+      drag = { kind: 'none' };
+      previewAnn = null;
+      redrawDrawingLayers(ctx);
+      notifySelection(ctx);
+      return;
+    }
+
+    if (drag.kind === 'create') {
+      if (previewAnn && previewAnn.id === '__p') {
+        const { id: _id, ...rest } = previewAnn;
+        addAnnotation({ ...rest, id: newAnnId() } as Annotation);
+      } else {
+        const { x0, y0, tool } = drag;
+        const minDist = 4;
+        const ex = Math.abs(x - x0) < minDist ? x0 + minDist : x;
+        const ey = Math.abs(y - y0) < minDist ? y0 + minDist : y;
+        if (tool === 'line') {
+          const p = endPoint(x0, y0, ex, ey, ev.shiftKey, 'snap8');
+          addAnnotation({ kind: 'line', id: newAnnId(), x0, y0, x1: p.x, y1: p.y, layer, style });
+        } else if (tool === 'rect') {
+          const r = rectFromDrag(x0, y0, ex, ey, ev.shiftKey);
+          addAnnotation({ kind: 'rect', id: newAnnId(), ...r, layer, style });
+        } else if (tool === 'square') {
+          const r = rectFromDrag(x0, y0, ex, ey, ev.shiftKey);
+          addAnnotation({ kind: 'square', id: newAnnId(), ...r, layer, style });
+        } else if (tool === 'arrow') {
+          const p = endPoint(x0, y0, ex, ey, ev.shiftKey, 'snap8');
+          addAnnotation({ kind: 'arrow', id: newAnnId(), x0, y0, x1: p.x, y1: p.y, layer, style });
+        } else if (tool === 'equalSpacing') {
+          addAnnotation({
+            kind: 'equalSpacing',
+            id: newAnnId(),
+            orientation: equalSpacingOrientationFromDrag(x0, y0, ex, ey),
+            count: drawingState.equalSpacingCount,
+            x0,
+            y0,
+            x1: ex,
+            y1: ey,
+            layer,
+            style,
+          });
+        } else if (tool === 'proportionScale') {
+          const divCount = drawingState.proportionDividerCount;
+          const p = snapAngle8(x0, y0, ex, ey);
+          addAnnotation({
+            kind: 'proportionScale',
+            id: newAnnId(),
+            x0,
+            y0,
+            x1: p.x,
+            y1: p.y,
+            count: divCount,
+            ratios: equalProportionRatios(divCount),
+            layer,
+            style,
+          });
+        }
+      }
+      drag = { kind: 'none' };
+      previewAnn = null;
+      redrawDrawingLayers(ctx);
+      notifySelection(ctx);
+      return;
+    }
+
+    drag = { kind: 'none' };
+    previewAnn = null;
+  });
+
+  hit.addEventListener('pointercancel', () => {
+    drag = { kind: 'none' };
+    previewAnn = null;
+    redrawDrawingLayers(getCtx());
+  });
+}
+
+export function setupDrawingKeyboard(onRedraw: () => void) {
+  window.addEventListener('keydown', (ev) => {
+    if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement || ev.target instanceof HTMLSelectElement)
+      return;
+    if (ev.key === 'Escape') {
+      drag = { kind: 'none' };
+      previewAnn = null;
+      onRedraw();
+    } else if (ev.key === 'Delete' || ev.key === 'Backspace') {
+      removeSelected();
+      onRedraw();
+    } else if (ev.key === 'v' || ev.key === 'V') {
+      drawingState.activeTool = 'select';
+      syncToolButtons();
+    } else if (ev.ctrlKey && ev.key === 'z') {
+      ev.preventDefault();
+      if (undo()) onRedraw();
+    } else if (ev.ctrlKey && (ev.key === 'y' || (ev.shiftKey && ev.key === 'z'))) {
+      ev.preventDefault();
+      if (redo()) onRedraw();
+    }
+  });
+}
+
+let toolOptionsRefresh: (() => void) | null = null;
+
+export function setToolOptionsRefresh(fn: () => void) {
+  toolOptionsRefresh = fn;
+}
+
+export function syncToolButtons() {
+  document.querySelectorAll('[data-tool]').forEach((b) => {
+    b.classList.toggle('active', (b as HTMLElement).dataset.tool === drawingState.activeTool);
+  });
+  toolOptionsRefresh?.();
+}
