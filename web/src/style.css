@@ -125,6 +125,99 @@ button {
   border-radius: 9px;
 }
 
+.sectionHint {
+  font-size: 11px;
+  color: var(--muted);
+  margin: -4px 0 10px;
+  line-height: 1.4;
+}
+
+.sourceStrip {
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fontRow {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.fontRow .fontCharInput {
+  flex: 0 0 auto;
+}
+
+.fontRow #fontParseBtn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.strokePool {
+  margin-top: 10px;
+}
+
+.fontCharInput {
+  width: 3em;
+  text-align: center;
+  font-size: 16px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
+.fontStrokeSummary {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+  margin: 8px 0 6px;
+  min-height: 1.2em;
+}
+
+.fontStrokePreview {
+  margin-top: 4px;
+}
+
+.fontStrokeGrid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.fontStrokeCell {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  text-align: center;
+}
+
+.fontStrokeCell img {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+  background: repeating-conic-gradient(
+      rgba(255, 255, 255, 0.1) 0% 25%,
+      rgba(255, 255, 255, 0.04) 0% 50%
+    )
+    50% / 12px 12px;
+  border-radius: 4px;
+}
+
+.fontStrokeCell span {
+  display: block;
+  font-size: 9px;
+  color: #000;
+  margin-top: 2px;
+  line-height: 1.2;
+}
+
 .groupCard {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -135,9 +228,107 @@ button {
 
 .groupHeader {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.groupItemList {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.groupItem,
+.groupItemEmpty {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.groupItemEmpty {
+  color: var(--muted);
+  grid-template-columns: 1fr;
+}
+
+.itemSource {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.itemSource-png {
+  background: rgba(122, 162, 255, 0.2);
+  color: rgb(160, 190, 255);
+}
+
+.itemSource-font {
+  background: rgba(255, 203, 107, 0.15);
+  color: rgb(255, 220, 150);
+}
+
+.itemName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.itemRemove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.itemRemove:hover {
+  color: var(--text);
+}
+
+.groupAddRow,
+.groupStrokePick {
+  display: grid;
+  grid-template-columns: auto 1fr;
   align-items: center;
   gap: 8px;
+  margin-top: 8px;
+}
+
+.groupStrokePick {
+  grid-template-columns: auto 1fr;
+}
+
+.strokePickBtns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.strokePickBtn {
+  min-width: 1.8em;
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.strokePickBtn.active {
+  border-color: rgb(255, 203, 107);
+  background: rgba(255, 203, 107, 0.2);
+}
+
+.strokePickBtn:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .groupHeader label {

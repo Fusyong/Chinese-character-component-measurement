@@ -18,6 +18,19 @@ import { mountPropsPanel } from './drawing/propsPanel';
 import { clearAnnotations, drawingState } from './drawing/store';
 import { fileKey } from './mask';
 import { renderGuideLayer, renderMeasureLayers, type MeasureRenderInput } from './renderPipeline';
+import { extractStrokes, type ExtractStrokesResult } from './font/extractStrokes';
+import {
+  appendPngFiles,
+  clearGroupItems,
+  exportFileEntries,
+  groupFiles,
+  hasFontStroke,
+  itemKey,
+  removeItem,
+  toggleFontStroke,
+  type GroupState,
+} from './groupItems';
+import { getWorkspaceCanvasSize } from './strokeCanvas';
 
 type BodyMethod = 'quantile1d' | 'integral2d';
 
@@ -54,8 +67,6 @@ const state: AppState = {
   overlayLineWidth: 2,
   centroidAreaK: 0.02,
 };
-
-type GroupState = Group & { files: File[] };
 
 type RGB = { r: number; g: number; b: number };
 
@@ -130,19 +141,12 @@ function newId() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 
-function formatFileNames(files: File[]): string {
-  if (files.length === 0) return '未选择文件';
-  if (files.length === 1) return files[0].name;
-  if (files.length <= 3) return files.map((f) => f.name).join('、');
-  return `${files[0].name} 等 ${files.length} 个文件`;
-}
-
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 let groups: GroupState[] = [
-  { id: newId(), name: '组 1', color: groupColors[0], enabled: true, files: [] },
+  { id: newId(), name: '组 1', color: groupColors[0], enabled: true, items: [] },
 ];
 
 const appEl = document.querySelector<HTMLDivElement>('#app');
@@ -151,7 +155,18 @@ if (!appEl) throw new Error('Missing #app');
 appEl.innerHTML = `
   <div class="app">
     <div class="panel compact" id="leftPanel">
-      <h2>组（多组共享同一套设置）</h2>
+      <h2>笔画分组</h2>
+      <p class="sectionHint">可混用 PNG 图像和汉字拆出笔画</p>
+      <div class="sourceStrip">
+        <div class="row fontRow">
+          <input id="fontCharInput" class="fontCharInput" type="text" maxlength="2" placeholder="字" title="输入要拆分的汉字" aria-label="楷体字" />
+          <button type="button" id="fontParseBtn">拆出笔画</button>
+        </div>
+        <div id="strokePool" class="strokePool" hidden>
+          <div id="fontStrokeSummary" class="fontStrokeSummary"></div>
+          <div id="fontStrokePreview" class="fontStrokePreview"></div>
+        </div>
+      </div>
       <div id="groupList"></div>
       <div class="btns">
         <button id="addGroup">添加组</button>
@@ -291,7 +306,7 @@ appEl.innerHTML = `
       </div>
       <h2>状态</h2>
       <div id="statusPanel">
-        <div class="kv"><div>状态</div><div><code id="status">未选择文件</code></div></div>
+        <div class="kv"><div>状态</div><div><code id="status">未添加图元</code></div></div>
         <div class="kv"><div>尺寸</div><div><code id="dim">—</code></div></div>
       </div>
       <h2>测量结果</h2>
@@ -300,7 +315,14 @@ appEl.innerHTML = `
   </div>
 `;
 
+let lastFontExtract: ExtractStrokesResult | null = null;
+
 const el = {
+  fontCharInput: document.querySelector<HTMLInputElement>('#fontCharInput')!,
+  fontParseBtn: document.querySelector<HTMLButtonElement>('#fontParseBtn')!,
+  strokePool: document.querySelector<HTMLDivElement>('#strokePool')!,
+  fontStrokeSummary: document.querySelector<HTMLDivElement>('#fontStrokeSummary')!,
+  fontStrokePreview: document.querySelector<HTMLDivElement>('#fontStrokePreview')!,
   groupList: document.querySelector<HTMLDivElement>('#groupList')!,
   addGroup: document.querySelector<HTMLButtonElement>('#addGroup')!,
   thr: document.querySelector<HTMLInputElement>('#thr')!,
@@ -358,6 +380,67 @@ const el = {
 
 function setWarn(msg: string) {
   el.warn.textContent = msg;
+}
+
+const fontStrokeBorderColors = [
+  '#ff6b6b',
+  '#7aa2ff',
+  '#ffcb6b',
+  '#8de9c7',
+  '#c98fff',
+  '#ff9adb',
+];
+
+function renderStrokePool(result: ExtractStrokesResult | null) {
+  if (!result) {
+    el.strokePool.hidden = true;
+    el.fontStrokeSummary.textContent = '';
+    el.fontStrokePreview.innerHTML = '';
+    return;
+  }
+
+  el.strokePool.hidden = false;
+
+  const cp = result.codePoint.toString(16).toUpperCase().padStart(4, '0');
+  const v = result.verify;
+  const side = result.layout.canvasSize;
+  el.fontStrokeSummary.textContent =
+    `700pt · 画布 ${side}×${side} · U+${cp} ${result.char}：${result.strokes.length} 条笔画` +
+    ` · 在下方各组点击笔画号添加/移除` +
+    ` · 校验 ${(v.areaRatio * 100).toFixed(1)}% / 差 ${(v.diffRatio * 100).toFixed(2)}%`;
+
+  const strokeCells = result.strokes
+    .map((s, i) => {
+      const border = fontStrokeBorderColors[i % fontStrokeBorderColors.length];
+      return `<div class="fontStrokeCell" style="border-color:${border}">
+        <img src="${s.canvas.toDataURL('image/png')}" alt="${i}" />
+        <span>${i}</span>
+      </div>`;
+    })
+    .join('');
+
+  el.fontStrokePreview.innerHTML = `<div class="fontStrokeGrid">${strokeCells}</div>`;
+}
+
+async function onFontParse() {
+  setWarn('');
+  el.fontParseBtn.disabled = true;
+  try {
+    const result = await extractStrokes(el.fontCharInput.value, {
+      canvasSize: getWorkspaceCanvasSize(),
+      maskOpts: { threshold: state.threshold, invert: state.invert },
+    });
+    lastFontExtract = result;
+    renderStrokePool(result);
+    renderGroupList();
+  } catch (e) {
+    lastFontExtract = null;
+    renderStrokePool(null);
+    renderGroupList();
+    setWarn(e instanceof Error ? e.message : String(e));
+  } finally {
+    el.fontParseBtn.disabled = false;
+  }
 }
 
 function fmt(n?: number) {
@@ -491,8 +574,8 @@ function interactionCtx() {
 
 function fileLabelForKey(key: string): string {
   for (const g of groups) {
-    for (const f of g.files) {
-      if (fileKey(f) === key) return f.name;
+    for (const it of g.items) {
+      if (itemKey(it) === key) return it.displayName;
     }
   }
   return key.split(':')[0] ?? key;
@@ -537,11 +620,45 @@ function renderMetricsPanel(payload: ExportPayload | null) {
   `;
 }
 
+/** 仅列出 PNG；字体笔画由下方笔画号按钮表示，避免重复。 */
+function renderGroupItemList(g: GroupState): string {
+  const pngItems = g.items.filter((it) => it.source === 'png');
+  if (pngItems.length > 0) {
+    return pngItems
+      .map(
+        (it) => `<li class="groupItem">
+        <span class="itemSource itemSource-png">PNG</span>
+        <span class="itemName" title="${escapeHtml(it.displayName)}">${escapeHtml(it.displayName)}</span>
+        <button type="button" class="itemRemove" data-act="removeItem" data-id="${g.id}" data-item-id="${it.id}" title="移除此图元">×</button>
+      </li>`
+      )
+      .join('');
+  }
+  if (g.items.length === 0) {
+    return '<li class="groupItemEmpty">暂无图元</li>';
+  }
+  return '';
+}
+
+function renderGroupStrokePickers(g: GroupState): string {
+  if (!lastFontExtract) return '';
+  const ch = lastFontExtract.char;
+  const btns = lastFontExtract.strokes
+    .map((s) => {
+      const on = hasFontStroke(g, ch, s.index);
+      return `<button type="button" class="strokePickBtn${on ? ' active' : ''}" data-act="toggleFontStroke" data-id="${g.id}" data-stroke="${s.index}" title="${on ? '移出' : '加入'}本组">${s.index}</button>`;
+    })
+    .join('');
+  return `<div class="groupStrokePick">
+    <div class="miniLabel" title="来自已解析的「${escapeHtml(ch)}」">笔画</div>
+    <div class="strokePickBtns">${btns}</div>
+  </div>`;
+}
+
 function renderGroupList() {
   const rows = groups
-    .map((g, idx) => {
-      const fileCount = g.files.length;
-      const fileNames = escapeHtml(formatFileNames(g.files));
+    .map((g) => {
+      const itemCount = g.items.length;
       const st = overlayStyleFromBaseColor(g.color);
       return `
         <div class="groupCard">
@@ -551,17 +668,22 @@ function renderGroupList() {
               <input type="checkbox" data-act="toggleEnabled" data-id="${g.id}" ${g.enabled ? 'checked' : ''} />
               <span data-act="rename" data-id="${g.id}">${g.name}</span>
             </label>
-            <small>${fileCount} 个</small>
+            <small>${itemCount} 个图元</small>
+            <button type="button" data-act="clearGroup" data-id="${g.id}" ${itemCount === 0 ? 'disabled' : ''}>清空</button>
             <button data-act="removeGroup" data-id="${g.id}" ${groups.length <= 1 ? 'disabled' : ''}>移除</button>
           </div>
-          <div class="groupFilesRow">
+          ${(() => {
+            const list = renderGroupItemList(g);
+            return list ? `<ul class="groupItemList">${list}</ul>` : '';
+          })()}
+          <div class="groupAddRow">
             <div class="miniLabel">PNG</div>
             <label class="filePicker">
               <input class="fileInput" data-act="pickFiles" data-id="${g.id}" type="file" accept="image/png" multiple />
-              <span class="filePickerBtn">浏览…</span>
-              <span class="filePickerNames" title="${fileNames}">${fileNames}</span>
+              <span class="filePickerBtn">添加 PNG…</span>
             </label>
           </div>
+          ${renderGroupStrokePickers(g)}
         </div>
       `;
     })
@@ -572,10 +694,10 @@ function renderGroupList() {
 async function recomputeAndRender() {
   setWarn('');
 
-  const groupsWithFiles = groups.filter((g) => g.files.length > 0);
+  const groupsWithFiles = groups.filter((g) => g.items.length > 0);
   const anyFiles = groupsWithFiles.length > 0;
   if (!anyFiles) {
-    el.status.textContent = '未选择文件';
+    el.status.textContent = '未添加图元';
     el.dim.textContent = '';
     lastExport = null;
     lastAnnotatedBlob = null;
@@ -587,15 +709,15 @@ async function recomputeAndRender() {
     return;
   }
 
-  const totalFiles = groupsWithFiles.reduce((acc, g) => acc + g.files.length, 0);
-  el.status.textContent = `处理中：${groupsWithFiles.length} 组 / ${totalFiles} 个文件`;
+  const totalFiles = groupsWithFiles.reduce((acc, g) => acc + g.items.length, 0);
+  el.status.textContent = `处理中：${groupsWithFiles.length} 组 / ${totalFiles} 个图元`;
 
   const maskOpts = { threshold: state.threshold, invert: state.invert };
   const groupMerged = await Promise.all(
     groupsWithFiles.map(async (g) => ({
       group: g,
-      merged: await buildMergedMaskFromFiles(g.files, maskOpts),
-      perFile: await buildPerFileMasks(g.files, maskOpts),
+      merged: await buildMergedMaskFromFiles(groupFiles(g), maskOpts),
+      perFile: await buildPerFileMasks(groupFiles(g), maskOpts),
     }))
   );
 
@@ -682,7 +804,7 @@ async function recomputeAndRender() {
     },
     contours,
     sources: {
-      files: groupsWithFiles.flatMap((g) => g.files.map((f) => ({ name: f.name, lastModified: f.lastModified, size: f.size }))),
+      files: groupsWithFiles.flatMap((g) => exportFileEntries(g.items)),
       binarize: {
         mode: overallMerged.binarizeMode,
         threshold: overallMerged.binarizeMode === 'lumaThreshold' ? state.threshold : undefined,
@@ -694,7 +816,7 @@ async function recomputeAndRender() {
 
   // Per-group metrics
   const groupResults: GroupResult[] = groupMerged
-    .filter((gm) => gm.group.files.length > 0)
+    .filter((gm) => gm.group.items.length > 0)
     .map((gm) => {
       const gBasic = computeBasicMetrics(gm.merged.mask, W, H);
 
@@ -729,7 +851,7 @@ async function recomputeAndRender() {
         },
         contours: gContours,
         sources: {
-          files: gm.group.files.map((f) => ({ name: f.name, lastModified: f.lastModified, size: f.size })),
+          files: exportFileEntries(gm.group.items),
           binarize: {
             mode: gm.merged.binarizeMode,
             threshold: gm.merged.binarizeMode === 'lumaThreshold' ? state.threshold : undefined,
@@ -795,7 +917,7 @@ async function recomputeAndRender() {
   redrawAll();
   await refreshExportBlob();
 
-  el.status.textContent = `完成：${groupsWithFiles.length} 组 / ${totalFiles} 个文件`;
+  el.status.textContent = `完成：${groupsWithFiles.length} 组 / ${totalFiles} 个图元`;
   renderMetricsPanel(payload);
   el.exportJSON.disabled = false;
   el.exportPNG.disabled = false;
@@ -862,9 +984,19 @@ el.groupList.addEventListener('change', (ev) => {
     g.enabled = t.checked;
     scheduleRecompute();
   } else if (act === 'pickFiles' && t instanceof HTMLInputElement) {
-    g.files = Array.from(t.files ?? []);
-    renderGroupList(); // refresh file counts
-    scheduleRecompute();
+    const picked = Array.from(t.files ?? []);
+    t.value = '';
+    if (picked.length === 0) return;
+    void (async () => {
+      try {
+        setWarn('');
+        await appendPngFiles(g, picked);
+        renderGroupList();
+        scheduleRecompute();
+      } catch (e) {
+        setWarn(e instanceof Error ? e.message : String(e));
+      }
+    })();
   }
 });
 
@@ -874,9 +1006,31 @@ el.groupList.addEventListener('click', (ev) => {
   const id = t.getAttribute('data-id');
   if (!act || !id) return;
 
+  const g = groups.find((x) => x.id === id);
+
   if (act === 'removeGroup') {
     if (groups.length <= 1) return;
     groups = groups.filter((g) => g.id !== id);
+    renderGroupList();
+    scheduleRecompute();
+  } else if (act === 'removeItem') {
+    if (!g) return;
+    const itemId = t.getAttribute('data-item-id');
+    if (!itemId) return;
+    removeItem(g, itemId);
+    renderGroupList();
+    scheduleRecompute();
+  } else if (act === 'clearGroup') {
+    if (!g) return;
+    clearGroupItems(g);
+    renderGroupList();
+    scheduleRecompute();
+  } else if (act === 'toggleFontStroke') {
+    if (!g || !lastFontExtract) return;
+    const strokeIdx = Number(t.getAttribute('data-stroke'));
+    const stroke = lastFontExtract.strokes[strokeIdx];
+    if (!stroke) return;
+    toggleFontStroke(g, lastFontExtract.char, stroke);
     renderGroupList();
     scheduleRecompute();
   }
@@ -885,8 +1039,17 @@ el.groupList.addEventListener('click', (ev) => {
 el.addGroup.addEventListener('click', () => {
   const idx = groups.length;
   const color = groupColors[idx % groupColors.length];
-  groups.push({ id: newId(), name: `组 ${idx + 1}`, color, enabled: true, files: [] });
+  groups.push({ id: newId(), name: `组 ${idx + 1}`, color, enabled: true, items: [] });
   renderGroupList();
+});
+
+el.fontParseBtn.addEventListener('click', () => void onFontParse());
+
+el.fontCharInput.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.isComposing) {
+    ev.preventDefault();
+    void onFontParse();
+  }
 });
 
 el.thr.addEventListener('input', () => {
@@ -968,7 +1131,7 @@ el.showCentroid.addEventListener('change', () => {
 });
 
 el.clear.addEventListener('click', () => {
-  groups = groups.map((g) => ({ ...g, files: [] }));
+  groups = groups.map((g) => ({ ...g, items: [] }));
   renderGroupList();
   scheduleRecompute();
 });

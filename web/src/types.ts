@@ -45,6 +45,8 @@ export type Metrics = {
       name: string;
       lastModified: number;
       size: number;
+      source?: 'png' | 'font';
+      displayName?: string;
     }>;
     binarize: {
       mode: 'alpha' | 'lumaThreshold';
