@@ -13,7 +13,7 @@ export function copyFrameAnnotations(
   rectOf: (m: Metrics) => { x0: number; y0: number; x1: number; y1: number } | undefined,
   style: DrawStyle
 ) {
-  const base = { kind, layer: 'top' as const, style };
+  const base = { kind, layer: 'middle' as const, style };
   if (data.overall?.show) {
     const rect = rectOf(data.overall.metrics);
     if (rect) {

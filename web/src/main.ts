@@ -8,14 +8,17 @@ import { marchingSquaresContours, simplifyPolylineRDP } from './contour';
 import { compositeExportBlob } from './drawing/composite';
 import {
   attachDrawingInteraction,
+  cancelPathDraftUnlessTool,
+  cancelPolygonDraft,
   redrawDrawingLayers,
   setToolOptionsRefresh,
   setupDrawingKeyboard,
   syncToolButtons,
 } from './drawing/interaction';
-import type { DrawTool } from './drawing/types';
+import { applyToolPresetToDrawingState, isConfigurableDrawTool, setToolPreset } from './drawing/toolPresets';
+import type { DrawLayer, DrawTool } from './drawing/types';
 import { mountPropsPanel } from './drawing/propsPanel';
-import { clearAnnotations, drawingState } from './drawing/store';
+import { clearAnnotations, drawingState, pruneStrokeFills } from './drawing/store';
 import { fileKey } from './mask';
 import { renderGuideLayer, renderMeasureLayers, type MeasureRenderInput } from './renderPipeline';
 import { extractStrokes, type ExtractStrokesResult } from './font/extractStrokes';
@@ -31,6 +34,7 @@ import {
   type GroupState,
 } from './groupItems';
 import { getWorkspaceCanvasSize } from './strokeCanvas';
+import { GUIDE_GRID_OPTIONS, type GuideGridKind } from './guideGrid';
 
 type BodyMethod = 'quantile1d' | 'integral2d';
 
@@ -49,6 +53,7 @@ type AppState = {
   overlayAlpha: number; // 0..1
   overlayLineWidth: number; // px
   centroidAreaK: number;
+  guideGridKind: GuideGridKind;
 };
 
 const state: AppState = {
@@ -66,6 +71,7 @@ const state: AppState = {
   overlayAlpha: 0.62,
   overlayLineWidth: 2,
   centroidAreaK: 0.02,
+  guideGridKind: 'tian',
 };
 
 type RGB = { r: number; g: number; b: number };
@@ -139,6 +145,13 @@ const overallBaseColor = 'rgb(77, 77, 77)';
 
 function newId() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+
+/** 按列表顺序固定分配组色（增删组后重排，不保留原索引颜色） */
+function syncGroupColors() {
+  groups.forEach((g, i) => {
+    g.color = groupColors[i % groupColors.length]!;
+  });
 }
 
 function escapeHtml(s: string): string {
@@ -238,8 +251,9 @@ appEl.innerHTML = `
     </div>
 
     <div class="canvasWrap">
+      <canvas id="drawBottomCv" class="layerCanvas layerBottom"></canvas>
       <canvas id="guideCv" class="layerCanvas layer0"></canvas>
-      <canvas id="drawUnderCv" class="layerCanvas layer1"></canvas>
+      <canvas id="drawMiddleCv" class="layerCanvas layer1"></canvas>
       <canvas id="measureCv" class="layerCanvas layer2"></canvas>
       <canvas id="glyphCv" class="layerCanvas layer3"></canvas>
       <canvas id="measureOverCv" class="layerCanvas layer4"></canvas>
@@ -250,29 +264,40 @@ appEl.innerHTML = `
     <div class="panel" id="rightPanel">
       <div class="drawToolbar" id="drawToolbar">
         <h2>手动画图</h2>
+        <div class="row">
+          <label for="guideGridKind">辅助格</label>
+          <select id="guideGridKind">
+            ${GUIDE_GRID_OPTIONS.map((o) => `<option value="${o.v}">${o.t}</option>`).join('')}
+          </select>
+        </div>
         <div class="toolGrid" id="toolGrid">
         <button type="button" class="toolBtn" data-tool="strokeFill">笔画涂色</button>
         <button type="button" class="toolBtn" data-tool="line">直线</button>
         <button type="button" class="toolBtn" data-tool="arrow">箭头</button>
-        <button type="button" class="toolBtn" data-tool="rect">方框</button>
-        <button type="button" class="toolBtn" data-tool="square">方块</button>
+        <button type="button" class="toolBtn" data-tool="polyline">折线</button>
+        <button type="button" class="toolBtn" data-tool="proportionScale">比例线段</button>
+        <button type="button" class="toolBtn" data-tool="equalSpacing">等距图</button>
+        <button type="button" class="toolBtn" data-tool="rect">方形</button>
+        <button type="button" class="toolBtn" data-tool="polygon">多边形</button>
         <button type="button" class="toolBtn" data-tool="annularSector">扇形</button>
-        <button type="button" class="toolBtn" data-tool="equalSpacing">等距线</button>
-        <button type="button" class="toolBtn" data-tool="proportionScale">比例尺</button>
         <button type="button" class="toolBtn" data-tool="crossMark">十字</button>
+        <button type="button" class="toolBtn" data-tool="centroidMark">重心图</button>
+        <button type="button" class="toolBtn" data-tool="circleMark">圆圈</button>
         <button type="button" class="toolBtn" data-tool="copyCentroid">复制重心</button>
         <button type="button" class="toolBtn" data-tool="copyBBox">复制外接框</button>
         <button type="button" class="toolBtn" data-tool="copyBodyBBox">复制主体框</button>
-        <button type="button" class="toolBtn toolBtnFull active" data-tool="select">选择并调整图形</button>
+        <button type="button" class="toolBtn toolBtnFull active" data-tool="select">选择并编辑</button>
         </div>
         <div class="toolOpts" id="toolOpts">
           <p id="toolOptHint" class="toolOptHint" hidden></p>
           <div id="drawStyleOpts" class="toolOptGroup">
             <div class="row propRowColor"><label for="drawColor">图示颜色</label><input id="drawColor" class="propColorInput" type="color" value="#dc3c3c" /></div>
             <div class="row"><label>线宽</label><input id="drawLw" type="range" min="1" max="6" step="0.5" value="2" /></div>
+            <div class="row" id="shapeFillRow" hidden><label for="drawFilled">填色</label><input id="drawFilled" type="checkbox" checked /></div>
             <div class="row"><label>新建图层</label>
               <select id="drawLayer">
-                <option value="under">默认（字下）</option>
+                <option value="bottom">下层</option>
+                <option value="middle" selected>中层</option>
                 <option value="top">上层</option>
               </select>
             </div>
@@ -287,12 +312,12 @@ appEl.innerHTML = `
           </div>
           <div id="crossOpts" class="toolOptGroup" hidden>
             <div class="row"><label>大小</label><input id="crossSize" type="number" min="4" max="200" value="40" /></div>
-            <p class="toolOptHint" style="margin:4px 0 0">点击画布放置十字，大小与拖拽无关。</p>
+            <p class="toolOptHint" style="margin:4px 0 0">点击画布放置图标，大小由工具选项设定，与拖拽无关。</p>
           </div>
           <div id="strokeOpts" class="toolOptGroup" hidden>
             <div class="row propRowColor"><label for="strokeColor">涂色</label><input id="strokeColor" class="propColorInput" type="color" value="#ff6b6b" /></div>
             <div class="row"><label>涂色层</label>
-              <select id="strokeLayer"><option value="under">默认（字下）</option><option value="top" selected>上层</option></select>
+              <select id="strokeLayer"><option value="middle">中层</option><option value="top" selected>上层</option></select>
             </div>
           </div>
         </div>
@@ -354,14 +379,18 @@ const el = {
   dim: document.querySelector<HTMLElement>('#dim')!,
   metrics: document.querySelector<HTMLElement>('#metrics')!,
   guideCanvas: document.querySelector<HTMLCanvasElement>('#guideCv')!,
-  drawUnderCanvas: document.querySelector<HTMLCanvasElement>('#drawUnderCv')!,
+  drawBottomCanvas: document.querySelector<HTMLCanvasElement>('#drawBottomCv')!,
+  drawMiddleCanvas: document.querySelector<HTMLCanvasElement>('#drawMiddleCv')!,
   measureCanvas: document.querySelector<HTMLCanvasElement>('#measureCv')!,
   glyphCanvas: document.querySelector<HTMLCanvasElement>('#glyphCv')!,
   measureOverCanvas: document.querySelector<HTMLCanvasElement>('#measureOverCv')!,
   drawTopCanvas: document.querySelector<HTMLCanvasElement>('#drawTopCv')!,
   hitCanvas: document.querySelector<HTMLCanvasElement>('#hitCv')!,
   drawColor: document.querySelector<HTMLInputElement>('#drawColor')!,
+  guideGridKind: document.querySelector<HTMLSelectElement>('#guideGridKind')!,
   drawLw: document.querySelector<HTMLInputElement>('#drawLw')!,
+  drawFilled: document.querySelector<HTMLInputElement>('#drawFilled')!,
+  shapeFillRow: document.querySelector<HTMLElement>('#shapeFillRow')!,
   drawLayer: document.querySelector<HTMLSelectElement>('#drawLayer')!,
   toolOptHint: document.querySelector<HTMLElement>('#toolOptHint')!,
   drawStyleOpts: document.querySelector<HTMLElement>('#drawStyleOpts')!,
@@ -491,8 +520,9 @@ let canvasSize = { w: 0, h: 0 };
 function setAllCanvasSize(w: number, h: number) {
   canvasSize = { w, h };
   for (const cv of [
+    el.drawBottomCanvas,
     el.guideCanvas,
-    el.drawUnderCanvas,
+    el.drawMiddleCanvas,
     el.measureCanvas,
     el.glyphCanvas,
     el.measureOverCanvas,
@@ -504,18 +534,36 @@ function setAllCanvasSize(w: number, h: number) {
   }
 }
 
-function clearAllLayers() {
-  for (const cv of [
-    el.guideCanvas,
-    el.drawUnderCanvas,
-    el.measureCanvas,
-    el.glyphCanvas,
-    el.measureOverCanvas,
-    el.drawTopCanvas,
-  ]) {
+function clearMeasureLayersOnly() {
+  for (const cv of [el.measureCanvas, el.glyphCanvas, el.measureOverCanvas]) {
     const ctx = cv.getContext('2d');
     if (ctx) ctx.clearRect(0, 0, cv.width, cv.height);
   }
+}
+
+function currentGroupFileKeys(): Set<string> {
+  return new Set(groups.flatMap((g) => g.items.map((it) => itemKey(it))));
+}
+
+function renderGuideIfSized() {
+  const { w, h } = canvasSize;
+  if (w <= 0 || h <= 0) return;
+  const gctx = el.guideCanvas.getContext('2d');
+  if (!gctx) return;
+  const guideStyle = guideStyleFromCanvasBorder(el.glyphCanvas);
+  renderGuideLayer(gctx, w, h, guideStyle, state.guideGridKind);
+}
+
+function initEmptyWorkspace() {
+  const size = getWorkspaceCanvasSize();
+  setAllCanvasSize(size, size);
+  el.dim.textContent = `${size}×${size}`;
+  el.status.textContent = '空白画布（可手动画图）';
+  el.exportJSON.disabled = true;
+  el.exportPNG.disabled = false;
+  renderGuideIfSized();
+  redrawAll();
+  void refreshExportBlob();
 }
 
 async function refreshExportBlob() {
@@ -524,7 +572,8 @@ async function refreshExportBlob() {
     return;
   }
   lastAnnotatedBlob = await compositeExportBlob({
-    drawUnder: el.drawUnderCanvas,
+    drawBottom: el.drawBottomCanvas,
+    drawMiddle: el.drawMiddleCanvas,
     measure: el.measureCanvas,
     glyph: el.glyphCanvas,
     measureOver: el.measureOverCanvas,
@@ -537,7 +586,8 @@ function interactionCtx() {
     width: canvasSize.w,
     height: canvasSize.h,
     canvases: {
-      drawUnder: el.drawUnderCanvas,
+      drawBottom: el.drawBottomCanvas,
+      drawMiddle: el.drawMiddleCanvas,
       drawTop: el.drawTopCanvas,
       hit: el.hitCanvas,
     },
@@ -569,6 +619,11 @@ function interactionCtx() {
     centroidRadii: (m: Metrics) => centroidEllipseRadiiPx(m, state.centroidAreaK),
     onExportRefresh: () => void refreshExportBlob(),
     onSelectionChange: () => refreshPropsPanel(),
+    onEnterEdit: () => {
+      drawingState.activeTool = 'select';
+      syncToolButtons();
+      updateToolOptionPanels();
+    },
   };
 }
 
@@ -656,6 +711,7 @@ function renderGroupStrokePickers(g: GroupState): string {
 }
 
 function renderGroupList() {
+  syncGroupColors();
   const rows = groups
     .map((g) => {
       const itemCount = g.items.length;
@@ -694,18 +750,28 @@ function renderGroupList() {
 async function recomputeAndRender() {
   setWarn('');
 
+  pruneStrokeFills(currentGroupFileKeys());
+
   const groupsWithFiles = groups.filter((g) => g.items.length > 0);
   const anyFiles = groupsWithFiles.length > 0;
   if (!anyFiles) {
-    el.status.textContent = '未添加图元';
-    el.dim.textContent = '';
+    el.status.textContent = canvasSize.w > 0 ? '空白画布（可手动画图）' : '未添加图元';
+    el.dim.textContent = canvasSize.w > 0 ? `${canvasSize.w}×${canvasSize.h}` : '';
     lastExport = null;
-    lastAnnotatedBlob = null;
-    renderMetricsPanel(null);
     lastPerFileMasks = [];
-    clearAllLayers();
+    renderMetricsPanel(null);
     el.exportJSON.disabled = true;
-    el.exportPNG.disabled = true;
+    el.exportPNG.disabled = canvasSize.w <= 0;
+
+    if (canvasSize.w <= 0) {
+      initEmptyWorkspace();
+      return;
+    }
+
+    clearMeasureLayersOnly();
+    renderGuideIfSized();
+    redrawAll();
+    await refreshExportBlob();
     return;
   }
 
@@ -762,7 +828,7 @@ async function recomputeAndRender() {
   const gctx = el.guideCanvas.getContext('2d');
   if (gctx) {
     const guideStyle = guideStyleFromCanvasBorder(el.glyphCanvas);
-    renderGuideLayer(gctx, W, H, guideStyle);
+    renderGuideLayer(gctx, W, H, guideStyle, state.guideGridKind);
   }
 
   const overallBasic = computeBasicMetrics(overallMerged.mask, W, H);
@@ -1037,9 +1103,7 @@ el.groupList.addEventListener('click', (ev) => {
 });
 
 el.addGroup.addEventListener('click', () => {
-  const idx = groups.length;
-  const color = groupColors[idx % groupColors.length];
-  groups.push({ id: newId(), name: `组 ${idx + 1}`, color, enabled: true, items: [] });
+  groups.push({ id: newId(), name: `组 ${groups.length + 1}`, color: groupColors[0]!, enabled: true, items: [] });
   renderGroupList();
 });
 
@@ -1158,6 +1222,13 @@ function hexToRgb(hex: string) {
   return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
 }
 
+function rgbToHex(css: string): string {
+  const m = css.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (!m) return '#dc3c3c';
+  const h = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0');
+  return `#${h(Number(m[1]))}${h(Number(m[2]))}${h(Number(m[3]))}`;
+}
+
 function updateDrawStyleFromUI() {
   const c = hexToRgb(el.drawColor.value);
   drawingState.drawStyle = {
@@ -1166,38 +1237,115 @@ function updateDrawStyleFromUI() {
   };
 }
 
+function applyToolPresetToUI(tool: DrawTool) {
+  if (!isConfigurableDrawTool(tool)) return;
+  const preset = applyToolPresetToDrawingState(tool, drawingState);
+  if (tool === 'strokeFill') {
+    el.strokeColor.value = rgbToHex(preset.strokeFillColor ?? drawingState.strokeFillColor);
+    el.strokeLayer.value = preset.layer;
+    return;
+  }
+  el.drawColor.value = rgbToHex(preset.style.color);
+  el.drawLw.value = String(preset.style.lineWidth);
+  el.drawLayer.value = preset.layer;
+  if (SHAPE_FILL_TOOLS.has(tool)) {
+    el.drawFilled.checked = preset.filled ?? true;
+  }
+  if (MARK_ICON_TOOLS.has(tool) && preset.markSize != null) {
+    el.crossSize.value = String(preset.markSize);
+  }
+  if (tool === 'equalSpacing' && preset.equalSpacingCount != null) {
+    el.eqCount.value = String(preset.equalSpacingCount);
+  }
+  if (tool === 'proportionScale' && preset.proportionDividerCount != null) {
+    el.propDivCount.value = String(preset.proportionDividerCount);
+  }
+}
+
+function saveToolPresetFromUI(tool: DrawTool) {
+  if (!isConfigurableDrawTool(tool)) return;
+  if (tool === 'strokeFill') {
+    const c = hexToRgb(el.strokeColor.value);
+    const color = `rgba(${c.r}, ${c.g}, ${c.b}, 0.45)`;
+    const layer = el.strokeLayer.value as DrawLayer;
+    drawingState.strokeFillColor = color;
+    drawingState.strokeFillLayer = layer;
+    setToolPreset(tool, { strokeFillColor: color, layer, style: drawingState.drawStyle });
+    return;
+  }
+  updateDrawStyleFromUI();
+  const layer = el.drawLayer.value as DrawLayer;
+  drawingState.defaultLayer = layer;
+  const patch: Parameters<typeof setToolPreset>[1] = {
+    style: { ...drawingState.drawStyle },
+    layer,
+  };
+  if (SHAPE_FILL_TOOLS.has(tool)) {
+    patch.filled = el.drawFilled.checked;
+  }
+  if (MARK_ICON_TOOLS.has(tool)) {
+    patch.markSize = Math.max(4, Number(el.crossSize.value) || 40);
+  }
+  if (tool === 'equalSpacing') {
+    const count = Math.max(1, Number(el.eqCount.value) || 3);
+    drawingState.equalSpacingCount = count;
+    patch.equalSpacingCount = count;
+  }
+  if (tool === 'proportionScale') {
+    const count = Math.max(2, Number(el.propDivCount.value) || 3);
+    drawingState.proportionDividerCount = count;
+    patch.proportionDividerCount = count;
+  }
+  setToolPreset(tool, patch);
+}
+
+function saveActiveToolPresetFromUI() {
+  saveToolPresetFromUI(drawingState.activeTool);
+}
+
+const MARK_ICON_TOOLS = new Set<DrawTool>(['crossMark', 'centroidMark', 'circleMark']);
+
+const SHAPE_FILL_TOOLS = new Set<DrawTool>(['rect', 'polygon']);
+
 const DRAW_SHAPE_TOOLS = new Set<DrawTool>([
   'line',
   'rect',
-  'square',
   'arrow',
+  'polygon',
+  'polyline',
   'equalSpacing',
   'proportionScale',
   'annularSector',
-  'crossMark',
+  ...MARK_ICON_TOOLS,
 ]);
 
 const TOOL_HINTS: Partial<Record<DrawTool, string>> = {
-  select: '点击图示选中；拖拽移动。Delete 删除，Shift 约束方向。',
-  line: '拖拽画直线；按住 Shift 八向吸附。',
-  arrow: '拖拽画箭头：起点横/竖短线（贴主方向一侧）标锐角；末端三角箭头。Shift 八向吸附。',
+  select: '点击图示选中；拖拽移动或编辑参数。Alt+拖拽复制（Mac：Option+拖拽）；Delete 删除；编辑时 Shift：直线/箭头八向、多边形/折线十六向、方形 Shift 正方形。',
+  line: '拖拽画直线；按住 Shift 八向吸附（45° 步进）。',
+  arrow: '拖拽画箭头；Shift 八向吸附。起点横/竖短线标锐角，末端三角箭头。',
+  rect: '拖拽画方形；默认填色，取消填色即为方框；Shift 约束为正方形。',
+  polygon: '依次点击顶点；默认填色，取消填色即为多边形框；Shift 十六向吸附；点击起点或 Enter 闭合；Backspace 撤销顶点，Esc 取消。',
+  polyline: '依次点击顶点；Shift 十六向吸附；Enter 结束（至少 2 点）；Backspace 撤销顶点，Esc 取消。',
   strokeFill: '点击笔画涂色；Ctrl+点击已涂色笔画可移除。',
   copyCentroid: '点击画布，将当前可见的整体/组重心复制到上层。',
   copyBBox: '点击画布，将当前可见的整体/组外接框复制到上层。',
   copyBodyBBox: '点击画布，将当前可见的整体/组主体框复制到上层。',
   annularSector: '点击放置扇形；拖拽圆心、内外圆上四点调整。默认内圆 r100、外圆 r300、左下四分之一环。',
   equalSpacing: '设分隔线数后拖拽矩形；沿较长边等分，分隔线横跨较短边。',
-  proportionScale: '设分隔线数后拖拽；八向吸附，默认等比例，标注实际格宽。',
+  proportionScale: '设分隔线数后拖拽；自动八向吸附（无需 Shift），默认等比例，标注实际格宽。',
   crossMark: '点击放置十字；大小由工具选项设定，与拖拽无关。',
+  centroidMark: '点击放置重心标记（椭圆+十字）；大小由工具选项设定。',
+  circleMark: '点击放置圆圈；大小由工具选项设定，与拖拽无关。',
 };
 
 function updateToolOptionPanels() {
   const t = drawingState.activeTool;
 
   el.drawStyleOpts.hidden = !DRAW_SHAPE_TOOLS.has(t);
+  el.shapeFillRow.hidden = !SHAPE_FILL_TOOLS.has(t);
   el.equalOpts.hidden = t !== 'equalSpacing';
   el.proportionOpts.hidden = t !== 'proportionScale';
-  el.crossOpts.hidden = t !== 'crossMark';
+  el.crossOpts.hidden = !MARK_ICON_TOOLS.has(t);
   el.strokeOpts.hidden = t !== 'strokeFill';
 
   const hint = TOOL_HINTS[t];
@@ -1212,32 +1360,43 @@ function updateToolOptionPanels() {
 
 document.querySelectorAll('[data-tool]').forEach((btn) => {
   btn.addEventListener('click', () => {
-    const tool = (btn as HTMLElement).dataset.tool as import('./drawing/types').DrawTool;
+    const tool = (btn as HTMLElement).dataset.tool as DrawTool;
+    cancelPathDraftUnlessTool(tool);
     drawingState.activeTool = tool;
+    applyToolPresetToUI(tool);
     syncToolButtons();
   });
 });
 
-el.drawColor.addEventListener('input', updateDrawStyleFromUI);
-el.drawLw.addEventListener('input', updateDrawStyleFromUI);
+el.drawColor.addEventListener('input', () => {
+  updateDrawStyleFromUI();
+  saveActiveToolPresetFromUI();
+});
+el.drawLw.addEventListener('input', () => {
+  updateDrawStyleFromUI();
+  saveActiveToolPresetFromUI();
+});
 el.drawLayer.addEventListener('change', () => {
-  drawingState.defaultLayer = el.drawLayer.value as 'under' | 'top';
+  drawingState.defaultLayer = el.drawLayer.value as DrawLayer;
+  saveActiveToolPresetFromUI();
+});
+el.drawFilled.addEventListener('change', () => {
+  saveActiveToolPresetFromUI();
 });
 el.eqCount.addEventListener('change', () => {
-  drawingState.equalSpacingCount = Math.max(1, Number(el.eqCount.value) || 3);
+  saveActiveToolPresetFromUI();
 });
 el.propDivCount.addEventListener('change', () => {
-  drawingState.proportionDividerCount = Math.max(2, Number(el.propDivCount.value) || 3);
+  saveActiveToolPresetFromUI();
 });
 el.crossSize.addEventListener('change', () => {
-  drawingState.crossMarkSize = Math.max(4, Number(el.crossSize.value) || 40);
+  saveActiveToolPresetFromUI();
 });
 el.strokeColor.addEventListener('input', () => {
-  const c = hexToRgb(el.strokeColor.value);
-  drawingState.strokeFillColor = `rgba(${c.r}, ${c.g}, ${c.b}, 0.45)`;
+  saveActiveToolPresetFromUI();
 });
 el.strokeLayer.addEventListener('change', () => {
-  drawingState.strokeFillLayer = el.strokeLayer.value as 'under' | 'top';
+  saveActiveToolPresetFromUI();
 });
 el.clearDrawings.addEventListener('click', () => {
   clearAnnotations();
@@ -1255,5 +1414,14 @@ refreshPropsPanel = mountPropsPanel(el.annPropsBody, {
 });
 
 attachDrawingInteraction(() => interactionCtx());
-setupDrawingKeyboard(() => redrawAll());
+setupDrawingKeyboard(() => interactionCtx(), () => redrawAll());
+
+el.guideGridKind.value = state.guideGridKind;
+el.guideGridKind.addEventListener('change', () => {
+  state.guideGridKind = el.guideGridKind.value as GuideGridKind;
+  renderGuideIfSized();
+  void refreshExportBlob();
+});
+
+initEmptyWorkspace();
 

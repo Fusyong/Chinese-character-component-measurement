@@ -1,7 +1,9 @@
 import type { Metrics } from '../types';
+import { duplicateAnnotationsForDrag } from './duplicate';
 import { copyFrameAnnotations } from './copyFrames';
-import { angleOnCircle, ANNULAR_DEFAULT_A0, ANNULAR_DEFAULT_A1, constrainAxis, dist, moveAnnotation, rectFromDrag, snapAngle8, squareCornerFromAnchor } from './geom';
+import { angleOnCircle, ANNULAR_DEFAULT_A0, ANNULAR_DEFAULT_A1, angleSnappedPoint, constrainAxis, dist, moveAnnotation, pathVertexAnchor, rectFromDrag, squareCornerFromAnchor } from './geom';
 import { equalSpacingOrientationFromDrag } from './equalSpacingTemplate';
+import { markIconPreset, getToolPreset, rememberToolPresetFromAnnotation, rememberToolPresetFromStrokeFill } from './toolPresets';
 import {
   clampSplitT,
   effectiveProportionRatios,
@@ -11,7 +13,7 @@ import {
   ratiosFromSplitT,
 } from './proportionScale';
 import { hitTestAnnotations, hitTestStrokeMask } from './hitTest';
-import { renderAnnotation, renderAnnotations, renderSelectionHandles, renderStrokeFills } from './render';
+import { renderAnnotation, renderAnnotations, renderPathDraft, renderSelectionHandles, renderStrokeFills } from './render';
 import {
   addAnnotation,
   beginEdit,
@@ -24,14 +26,16 @@ import {
   setStrokeFill,
   undo,
   updateAnnotation,
+  pushUndo,
 } from './store';
-import type { Annotation, DrawTool } from './types';
+import type { Annotation, DrawLayer, DrawStyle, DrawTool, Point } from './types';
 
 export type InteractionContext = {
   width: number;
   height: number;
   canvases: {
-    drawUnder: HTMLCanvasElement;
+    drawBottom: HTMLCanvasElement;
+    drawMiddle: HTMLCanvasElement;
     drawTop: HTMLCanvasElement;
     hit: HTMLCanvasElement;
   };
@@ -43,6 +47,7 @@ export type InteractionContext = {
   centroidRadii: (m: Metrics) => { rx: number; ry: number };
   onExportRefresh: () => void;
   onSelectionChange?: () => void;
+  onEnterEdit?: () => void;
 };
 
 type DragState =
@@ -53,6 +58,32 @@ type DragState =
 
 let drag: DragState = { kind: 'none' };
 let previewAnn: Annotation | null = null;
+
+type PathDraftMode = 'polygon' | 'polyline';
+type PathDraft = { mode: PathDraftMode; points: Point[]; layer: DrawLayer; style: DrawStyle; filled?: boolean };
+let pathDraft: PathDraft | null = null;
+let pathCursor: Point | null = null;
+
+const POLYGON_CLOSE_R = 12;
+const POLYGON_MIN_VERTEX_DIST = 4;
+
+export function cancelPolygonDraft() {
+  pathDraft = null;
+  pathCursor = null;
+}
+
+export function hasPolygonDraft() {
+  return pathDraft !== null;
+}
+
+export function cancelPathDraftUnlessTool(tool: DrawTool) {
+  if (!pathDraft) return;
+  if (tool !== 'polygon' && tool !== 'polyline') {
+    cancelPolygonDraft();
+    return;
+  }
+  if (pathDraft.mode !== tool) cancelPolygonDraft();
+}
 
 function canvasPoint(cv: HTMLCanvasElement, ev: PointerEvent) {
   const rect = cv.getBoundingClientRect();
@@ -70,32 +101,54 @@ function maskMap(ctx: InteractionContext): Map<string, Uint8Array> {
   return m;
 }
 
+function ctxForLayer(
+  layer: DrawLayer,
+  ctxs: { bottom: CanvasRenderingContext2D; middle: CanvasRenderingContext2D; top: CanvasRenderingContext2D }
+) {
+  if (layer === 'bottom') return ctxs.bottom;
+  if (layer === 'top') return ctxs.top;
+  return ctxs.middle;
+}
+
 export function redrawDrawingLayers(ctx: InteractionContext) {
   const W = ctx.width;
   const H = ctx.height;
-  const uctx = ctx.canvases.drawUnder.getContext('2d', { willReadFrequently: true });
+  const bctx = ctx.canvases.drawBottom.getContext('2d', { willReadFrequently: true });
+  const mctx = ctx.canvases.drawMiddle.getContext('2d', { willReadFrequently: true });
   const tctx = ctx.canvases.drawTop.getContext('2d', { willReadFrequently: true });
-  if (!uctx || !tctx) return;
+  if (!bctx || !mctx || !tctx) return;
 
-  uctx.clearRect(0, 0, W, H);
+  bctx.clearRect(0, 0, W, H);
+  mctx.clearRect(0, 0, W, H);
   tctx.clearRect(0, 0, W, H);
 
+  const layerCtxs = { bottom: bctx, middle: mctx, top: tctx };
   const masks = maskMap(ctx);
-  renderStrokeFills(uctx, drawingState.strokeFills, 'under', W, H, masks);
+  renderStrokeFills(bctx, drawingState.strokeFills, 'bottom', W, H, masks);
+  renderStrokeFills(mctx, drawingState.strokeFills, 'middle', W, H, masks);
   renderStrokeFills(tctx, drawingState.strokeFills, 'top', W, H, masks);
 
-  renderAnnotations(uctx, drawingState.annotations, 'under', W, drawingState.selectedIds);
+  renderAnnotations(bctx, drawingState.annotations, 'bottom', W, drawingState.selectedIds);
+  renderAnnotations(mctx, drawingState.annotations, 'middle', W, drawingState.selectedIds);
   renderAnnotations(tctx, drawingState.annotations, 'top', W, drawingState.selectedIds);
 
   if (previewAnn) {
-    const pctx = previewAnn.layer === 'under' ? uctx : tctx;
+    const pctx = ctxForLayer(previewAnn.layer, layerCtxs);
     renderAnnotation(pctx, previewAnn, W, false);
+  }
+
+  if (pathDraft) {
+    const pctx = ctxForLayer(pathDraft.layer, layerCtxs);
+    renderPathDraft(pctx, pathDraft.points, pathCursor, pathDraft.style, {
+      closePreview: pathDraft.mode === 'polygon',
+      fillPreview: pathDraft.mode === 'polygon' && (pathDraft.filled ?? true),
+    });
   }
 
   for (const id of drawingState.selectedIds) {
     const ann = drawingState.annotations.find((a) => a.id === id);
     if (!ann) continue;
-    renderSelectionHandles(ann.layer === 'under' ? uctx : tctx, ann, W);
+    renderSelectionHandles(ctxForLayer(ann.layer, layerCtxs), ann, W);
   }
 
   ctx.onExportRefresh();
@@ -109,12 +162,115 @@ function notifySelection(ctx: InteractionContext) {
   ctx.onSelectionChange?.();
 }
 
-type ShiftConstraint = 'axis' | 'snap8';
+function enterEditAfterCreate(ctx: InteractionContext) {
+  ctx.onEnterEdit?.();
+  notifySelection(ctx);
+}
 
-function endPoint(x0: number, y0: number, x1: number, y1: number, shift: boolean, shiftConstraint: ShiftConstraint = 'axis') {
-  if (shift && shiftConstraint === 'snap8') return snapAngle8(x0, y0, x1, y1);
+function finishCreate(ctx: InteractionContext) {
+  drag = { kind: 'none' };
+  previewAnn = null;
+  redrawDrawingLayers(ctx);
+  enterEditAfterCreate(ctx);
+}
+
+function finishPathDraft(ctx: InteractionContext) {
+  if (!pathDraft) {
+    cancelPolygonDraft();
+    redrawDrawingLayers(ctx);
+    return;
+  }
+  const minPts = pathDraft.mode === 'polygon' ? 3 : 2;
+  if (pathDraft.points.length < minPts) {
+    cancelPolygonDraft();
+    redrawDrawingLayers(ctx);
+    return;
+  }
+  if (pathDraft.mode === 'polygon') {
+    addAnnotation({
+      kind: 'polygon',
+      id: newAnnId(),
+      points: pathDraft.points.map((p) => ({ ...p })),
+      closed: true,
+      filled: pathDraft.filled ?? true,
+      layer: pathDraft.layer,
+      style: { ...pathDraft.style },
+    });
+  } else {
+    addAnnotation({
+      kind: 'polyline',
+      id: newAnnId(),
+      points: pathDraft.points.map((p) => ({ ...p })),
+      layer: pathDraft.layer,
+      style: { ...pathDraft.style },
+    });
+  }
+  cancelPolygonDraft();
+  finishCreate(ctx);
+}
+
+function pathDraftActiveForTool(tool: DrawTool) {
+  return pathDraft !== null && pathDraft.mode === tool;
+}
+
+function addPathVertex(x: number, y: number, shift: boolean) {
+  if (!pathDraft) return;
+  const last = pathDraft.points[pathDraft.points.length - 1]!;
+  let px = x;
+  let py = y;
+  if (shift) ({ x: px, y: py } = angleSnappedPoint(last.x, last.y, x, y, 'snap16', { shift: true }));
+  if (dist(px, py, last.x, last.y) >= POLYGON_MIN_VERTEX_DIST) {
+    pathDraft.points.push({ x: px, y: py });
+  }
+  pathCursor = { x: px, y: py };
+}
+
+type ShiftConstraint = 'axis' | 'snap8' | 'snap16';
+
+function endPoint(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  shift: boolean,
+  shiftConstraint: ShiftConstraint = 'axis'
+) {
+  if (shift && shiftConstraint === 'snap8') return angleSnappedPoint(x0, y0, x1, y1, 'snap8', { shift: true });
+  if (shift && shiftConstraint === 'snap16') return angleSnappedPoint(x0, y0, x1, y1, 'snap16', { shift: true });
   if (shift && shiftConstraint === 'axis') return constrainAxis(x0, y0, x1, y1, true);
   return { x: x1, y: y1 };
+}
+
+function handlePathToolDown(
+  ctx: InteractionContext,
+  tool: 'polygon' | 'polyline',
+  x: number,
+  y: number,
+  shift: boolean
+) {
+  const style = currentDrawStyle();
+  const layer = defaultLayer();
+
+  if (!pathDraft || pathDraft.mode !== tool) {
+    const filled = tool === 'polygon' ? (getToolPreset('polygon').filled ?? true) : undefined;
+    pathDraft = { mode: tool, points: [{ x, y }], layer, style, filled };
+    pathCursor = { x, y };
+    drag = { kind: 'none' };
+    redrawDrawingLayers(ctx);
+    return;
+  }
+
+  if (tool === 'polygon') {
+    const first = pathDraft.points[0]!;
+    if (pathDraft.points.length >= 3 && dist(x, y, first.x, first.y) <= POLYGON_CLOSE_R) {
+      finishPathDraft(ctx);
+      return;
+    }
+  }
+
+  addPathVertex(x, y, shift);
+  drag = { kind: 'none' };
+  redrawDrawingLayers(ctx);
 }
 
 export function attachDrawingInteraction(getCtx: () => InteractionContext) {
@@ -142,11 +298,23 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
           drawingState.selectedStrokeKeys.delete(key);
         } else {
           drawingState.selectedStrokeKeys.add(key);
-          if (item) setStrokeFill(key, item.groupId, drawingState.strokeFillColor, drawingState.strokeFillLayer);
+          if (item) {
+            setStrokeFill(key, item.groupId, drawingState.strokeFillColor, drawingState.strokeFillLayer);
+            rememberToolPresetFromStrokeFill({
+              color: drawingState.strokeFillColor,
+              layer: drawingState.strokeFillLayer,
+            });
+          }
         }
       } else {
         drawingState.selectedStrokeKeys = new Set([key]);
-        if (item) setStrokeFill(key, item.groupId, drawingState.strokeFillColor, drawingState.strokeFillLayer);
+        if (item) {
+          setStrokeFill(key, item.groupId, drawingState.strokeFillColor, drawingState.strokeFillLayer);
+          rememberToolPresetFromStrokeFill({
+            color: drawingState.strokeFillColor,
+            layer: drawingState.strokeFillLayer,
+          });
+        }
       }
 
       redrawDrawingLayers(ctx);
@@ -187,7 +355,7 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
         });
       }
       redrawDrawingLayers(ctx);
-      notifySelection(ctx);
+      enterEditAfterCreate(ctx);
       return;
     }
 
@@ -201,7 +369,7 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
           : (m: Metrics) => m.bodyBBox?.rect;
       copyFrameAnnotations(data, kind, rectOf, style);
       redrawDrawingLayers(ctx);
-      notifySelection(ctx);
+      enterEditAfterCreate(ctx);
       return;
     }
 
@@ -216,18 +384,32 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
         return;
       }
       if (hitR.kind === 'move') {
-        const bases = new Map<string, Annotation>();
-        const ids = ev.shiftKey && drawingState.selectedIds.has(hitR.annId) ? drawingState.selectedIds : new Set([hitR.annId]);
+        const ids =
+          ev.shiftKey && drawingState.selectedIds.has(hitR.annId) ? drawingState.selectedIds : new Set([hitR.annId]);
         if (!ev.shiftKey) {
           drawingState.selectedIds = ids;
           drawingState.selectedStrokeKeys = new Set();
         }
-        for (const id of ids) {
-          const a = drawingState.annotations.find((an) => an.id === id);
-          if (a) bases.set(id, structuredClone(a));
+
+        let bases = new Map<string, Annotation>();
+        let primaryId = hitR.annId;
+
+        if (ev.altKey) {
+          pushUndo();
+          const dup = duplicateAnnotationsForDrag(ids, hitR.annId);
+          if (!dup) return;
+          bases = dup.bases;
+          primaryId = dup.primaryId;
+          drawingState.selectedIds = dup.newIds;
+        } else {
+          for (const id of ids) {
+            const a = drawingState.annotations.find((an) => an.id === id);
+            if (a) bases.set(id, structuredClone(a));
+          }
+          beginEdit();
         }
-        beginEdit();
-        drag = { kind: 'move', annId: hitR.annId, ox: x, oy: y, bases };
+
+        drag = { kind: 'move', annId: primaryId, ox: x, oy: y, bases };
         notifySelection(ctx);
         return;
       }
@@ -238,21 +420,23 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
       return;
     }
 
-    if (tool === 'crossMark') {
-      const style = currentDrawStyle();
-      const layer = defaultLayer();
+    if (tool === 'polygon' || tool === 'polyline') {
+      handlePathToolDown(ctx, tool, x, y, ev.shiftKey);
+      return;
+    }
+
+    if (tool === 'crossMark' || tool === 'centroidMark' || tool === 'circleMark') {
+      const preset = markIconPreset(tool);
       addAnnotation({
-        kind: 'crossMark',
+        kind: tool,
         id: newAnnId(),
         x,
         y,
-        size: drawingState.crossMarkSize,
-        layer,
-        style,
+        size: preset.size,
+        layer: preset.layer,
+        style: { ...preset.style },
       });
-      drag = { kind: 'none' };
-      redrawDrawingLayers(ctx);
-      notifySelection(ctx);
+      finishCreate(ctx);
       return;
     }
 
@@ -271,9 +455,7 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
         layer,
         style,
       });
-      drag = { kind: 'none' };
-      redrawDrawingLayers(ctx);
-      notifySelection(ctx);
+      finishCreate(ctx);
       return;
     }
 
@@ -305,13 +487,9 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
       const s = hd.startAnn;
       if (!ann) return;
       if ((ann.kind === 'line' || ann.kind === 'arrow') && (s.kind === ann.kind)) {
-        let px = x;
-        let py = y;
-        if (shift) {
-          const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
-          const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
-          ({ x: px, y: py } = snapAngle8(ax, ay, x, y));
-        }
+        const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
+        const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
+        const { x: px, y: py } = angleSnappedPoint(ax, ay, x, y, 'snap8', { shift });
         if (hd.handle === 'p0') updateAnnotation(ann.id, { x0: px, y0: py });
         else updateAnnotation(ann.id, { x1: px, y1: py });
       } else if (ann.kind === 'proportionScale' && s.kind === 'proportionScale') {
@@ -329,7 +507,7 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
         } else if (hd.handle === 'p0' || hd.handle === 'p1') {
           const ax = hd.handle === 'p0' ? ann.x1 : ann.x0;
           const ay = hd.handle === 'p0' ? ann.y1 : ann.y0;
-          const { x: px, y: py } = snapAngle8(ax, ay, x, y);
+          const { x: px, y: py } = angleSnappedPoint(ax, ay, x, y, 'snap8', { requireShift: false });
           if (hd.handle === 'p0') updateAnnotation(ann.id, { x0: px, y0: py });
           else updateAnnotation(ann.id, { x1: px, y1: py });
         }
@@ -351,8 +529,21 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
             ? { x0: x, y0: y, orientation: equalSpacingOrientationFromDrag(x, y, ann.x1, ann.y1) }
             : { x1: x, y1: y, orientation: equalSpacingOrientationFromDrag(ann.x0, ann.y0, x, y) };
         updateAnnotation(ann.id, patch);
-      } else if (ann.kind === 'crossMark') {
+      } else if (ann.kind === 'crossMark' || ann.kind === 'centroidMark' || ann.kind === 'circleMark') {
         updateAnnotation(ann.id, { size: Math.max(dist(ann.x, ann.y, x, y) * 2, 8) });
+      } else if (
+        (ann.kind === 'polygon' || ann.kind === 'polyline') &&
+        (s.kind === 'polygon' || s.kind === 'polyline') &&
+        hd.handle.startsWith('v:')
+      ) {
+        const idx = Number(hd.handle.slice(2));
+        if (idx >= 0 && idx < ann.points.length) {
+          const closed = ann.kind === 'polygon';
+          const anchor = pathVertexAnchor(ann.points, idx, closed);
+          const { x: px, y: py } = angleSnappedPoint(anchor.x, anchor.y, x, y, 'snap16', { shift });
+          const next = ann.points.map((p, i) => (i === idx ? { x: px, y: py } : p));
+          updateAnnotation(ann.id, { points: next });
+        }
       } else if (ann.kind === 'annularSector' && s.kind === 'annularSector') {
         const ang = angleOnCircle(ann.cx, ann.cy, x, y);
         const r = Math.max(dist(ann.cx, ann.cy, x, y), 4);
@@ -373,7 +564,14 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
       return;
     }
 
-    if (drag.kind !== 'create') return;
+    if (drag.kind !== 'create') {
+      if (drag.kind === 'none' && pathDraft && pathDraftActiveForTool(drawingState.activeTool)) {
+        const last = pathDraft.points[pathDraft.points.length - 1]!;
+        pathCursor = angleSnappedPoint(last.x, last.y, x, y, 'snap16', { shift });
+        redrawDrawingLayers(ctx);
+      }
+      return;
+    }
 
     const { x0, y0, tool } = drag;
 
@@ -382,10 +580,8 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
       previewAnn = { kind: 'line', id: '__p', x0, y0, x1: p.x, y1: p.y, layer, style } as Annotation;
     } else if (tool === 'rect') {
       const r = rectFromDrag(x0, y0, x, y, shift);
-      previewAnn = { kind: 'rect', id: '__p', ...r, layer, style } as Annotation;
-    } else if (tool === 'square') {
-      const r = rectFromDrag(x0, y0, x, y, shift);
-      previewAnn = { kind: 'square', id: '__p', ...r, layer, style } as Annotation;
+      const filled = getToolPreset('rect').filled ?? true;
+      previewAnn = { kind: 'rect', id: '__p', ...r, filled, layer, style } as Annotation;
     } else if (tool === 'arrow') {
       const p = endPoint(x0, y0, x, y, shift, 'snap8');
       previewAnn = { kind: 'arrow', id: '__p', x0, y0, x1: p.x, y1: p.y, layer, style } as Annotation;
@@ -404,7 +600,7 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
       } as Annotation;
     } else if (tool === 'proportionScale') {
       const divCount = drawingState.proportionDividerCount;
-      const p = snapAngle8(x0, y0, x, y);
+      const p = angleSnappedPoint(x0, y0, x, y, 'snap8', { requireShift: false });
       previewAnn = {
         kind: 'proportionScale',
         id: '__p',
@@ -430,6 +626,11 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
     const layer = defaultLayer();
 
     if (drag.kind === 'move' || drag.kind === 'handle') {
+      if (drag.kind === 'handle') {
+        const hd = drag;
+        const ann = drawingState.annotations.find((a) => a.id === hd.annId);
+        if (ann) rememberToolPresetFromAnnotation(ann);
+      }
       drag = { kind: 'none' };
       previewAnn = null;
       redrawDrawingLayers(ctx);
@@ -451,10 +652,8 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
           addAnnotation({ kind: 'line', id: newAnnId(), x0, y0, x1: p.x, y1: p.y, layer, style });
         } else if (tool === 'rect') {
           const r = rectFromDrag(x0, y0, ex, ey, ev.shiftKey);
-          addAnnotation({ kind: 'rect', id: newAnnId(), ...r, layer, style });
-        } else if (tool === 'square') {
-          const r = rectFromDrag(x0, y0, ex, ey, ev.shiftKey);
-          addAnnotation({ kind: 'square', id: newAnnId(), ...r, layer, style });
+          const filled = getToolPreset('rect').filled ?? true;
+          addAnnotation({ kind: 'rect', id: newAnnId(), ...r, filled, layer, style });
         } else if (tool === 'arrow') {
           const p = endPoint(x0, y0, ex, ey, ev.shiftKey, 'snap8');
           addAnnotation({ kind: 'arrow', id: newAnnId(), x0, y0, x1: p.x, y1: p.y, layer, style });
@@ -473,7 +672,7 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
           });
         } else if (tool === 'proportionScale') {
           const divCount = drawingState.proportionDividerCount;
-          const p = snapAngle8(x0, y0, ex, ey);
+          const p = angleSnappedPoint(x0, y0, ex, ey, 'snap8', { requireShift: false });
           addAnnotation({
             kind: 'proportionScale',
             id: newAnnId(),
@@ -488,10 +687,7 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
           });
         }
       }
-      drag = { kind: 'none' };
-      previewAnn = null;
-      redrawDrawingLayers(ctx);
-      notifySelection(ctx);
+      finishCreate(ctx);
       return;
     }
 
@@ -506,13 +702,23 @@ export function attachDrawingInteraction(getCtx: () => InteractionContext) {
   });
 }
 
-export function setupDrawingKeyboard(onRedraw: () => void) {
+export function setupDrawingKeyboard(getCtx: () => InteractionContext, onRedraw: () => void) {
   window.addEventListener('keydown', (ev) => {
     if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement || ev.target instanceof HTMLSelectElement)
       return;
     if (ev.key === 'Escape') {
       drag = { kind: 'none' };
       previewAnn = null;
+      cancelPolygonDraft();
+      onRedraw();
+    } else if (ev.key === 'Enter' && pathDraft && pathDraftActiveForTool(drawingState.activeTool)) {
+      ev.preventDefault();
+      finishPathDraft(getCtx());
+      onRedraw();
+    } else if (ev.key === 'Backspace' && pathDraft && pathDraftActiveForTool(drawingState.activeTool)) {
+      ev.preventDefault();
+      pathDraft.points.pop();
+      if (pathDraft.points.length === 0) cancelPolygonDraft();
       onRedraw();
     } else if (ev.key === 'Delete' || ev.key === 'Backspace') {
       removeSelected();

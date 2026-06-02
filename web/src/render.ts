@@ -1,5 +1,7 @@
-import type { Metrics } from './types';
+import type { GuideGridKind } from './guideGrid';
+import { renderGuideGrid } from './guideGrid';
 import type { MergedMask } from './mask';
+import type { Metrics } from './types';
 
 export function renderMask(ctx: CanvasRenderingContext2D, merged: MergedMask) {
   const { width, height, mask } = merged;
@@ -58,28 +60,6 @@ function drawCentroidEllipse(ctx: CanvasRenderingContext2D, x: number, y: number
   ctx.restore();
 }
 
-function drawGuideCrosshair(ctx: CanvasRenderingContext2D, width: number, height: number, x: number, y: number, style: OverlayStyle) {
-  ctx.save();
-  ctx.globalAlpha = style.alpha;
-  ctx.strokeStyle = style.color;
-  ctx.lineWidth = style.lineWidth;
-  ctx.setLineDash(style.dash ?? [8, 6]);
-
-  // Vertical line at x
-  ctx.beginPath();
-  ctx.moveTo(x + 0.5, 0);
-  ctx.lineTo(x + 0.5, height);
-  ctx.stroke();
-
-  // Horizontal line at y
-  ctx.beginPath();
-  ctx.moveTo(0, y + 0.5);
-  ctx.lineTo(width, y + 0.5);
-  ctx.stroke();
-
-  ctx.restore();
-}
-
 export function renderBoxUnderlays(
   ctx: CanvasRenderingContext2D,
   metrics: Metrics,
@@ -119,8 +99,14 @@ export function renderContourOverlay(ctx: CanvasRenderingContext2D, metrics: Met
   ctx.restore();
 }
 
-export function renderGuidesUnderlay(ctx: CanvasRenderingContext2D, width: number, height: number, style: OverlayStyle) {
-  drawGuideCrosshair(ctx, width, height, 400, 400, style);
+export function renderGuidesUnderlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  style: OverlayStyle,
+  kind: GuideGridKind = 'tian'
+) {
+  renderGuideGrid(ctx, width, height, kind, style);
 }
 
 export function clearCanvas(ctx: CanvasRenderingContext2D, width: number, height: number) {

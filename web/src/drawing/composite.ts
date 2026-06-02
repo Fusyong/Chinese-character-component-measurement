@@ -1,5 +1,6 @@
 export type LayerCanvases = {
-  drawUnder: HTMLCanvasElement;
+  drawBottom: HTMLCanvasElement;
+  drawMiddle: HTMLCanvasElement;
   measure: HTMLCanvasElement;
   glyph: HTMLCanvasElement;
   measureOver: HTMLCanvasElement;
@@ -15,7 +16,14 @@ export async function compositeExportBlob(layers: LayerCanvases): Promise<Blob> 
   const ctx = off.getContext('2d');
   if (!ctx) return new Blob();
 
-  const order = [layers.drawUnder, layers.measure, layers.glyph, layers.measureOver, layers.drawTop];
+  const order = [
+    layers.drawBottom,
+    layers.drawMiddle,
+    layers.measure,
+    layers.glyph,
+    layers.measureOver,
+    layers.drawTop,
+  ];
   for (const cv of order) {
     if (cv.width === W && cv.height === H) ctx.drawImage(cv, 0, 0);
   }

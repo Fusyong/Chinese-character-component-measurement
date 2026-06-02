@@ -1,6 +1,6 @@
 import opentype from 'opentype.js';
 
-export const KAITI_FONT_URL = '/fonts/KaiTi_GB2312.ttf';
+export const KAITI_FONT_URL = `${import.meta.env.BASE_URL}fonts/k.ttf`;
 
 let fontPromise: Promise<opentype.Font> | null = null;
 

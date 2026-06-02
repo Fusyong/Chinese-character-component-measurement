@@ -87,6 +87,44 @@ export function snapAngle8(x0: number, y0: number, x1: number, y1: number): { x:
   return { x: x0 + Math.cos(snapped) * len, y: y0 + Math.sin(snapped) * len };
 }
 
+/** 16 向吸附：0°、30°、45°、60°、90° … 每象限 4 个方向 */
+const SNAP16_DEG = [0, 30, 45, 60, 90, 120, 135, 150, 180, 210, 225, 240, 270, 300, 315, 330] as const;
+
+export function snapAngle16(x0: number, y0: number, x1: number, y1: number): { x: number; y: number } {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) return { x: x1, y: y1 };
+  let deg = (Math.atan2(dy, dx) * 180) / Math.PI;
+  if (deg < 0) deg += 360;
+  let best: number = SNAP16_DEG[0];
+  let bestDiff = Infinity;
+  for (const d of SNAP16_DEG) {
+    let diff = Math.abs(deg - d);
+    if (diff > 180) diff = 360 - diff;
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = d;
+    }
+  }
+  const rad = (best * Math.PI) / 180;
+  return { x: x0 + Math.cos(rad) * len, y: y0 + Math.sin(rad) * len };
+}
+
+export function angleSnappedPoint(
+  ax: number,
+  ay: number,
+  x: number,
+  y: number,
+  mode: 'snap8' | 'snap16',
+  opts: { shift?: boolean; requireShift?: boolean } = {}
+): { x: number; y: number } {
+  const requireShift = opts.requireShift ?? true;
+  const shift = opts.shift ?? false;
+  if (requireShift && !shift) return { x, y };
+  return mode === 'snap16' ? snapAngle16(ax, ay, x, y) : snapAngle8(ax, ay, x, y);
+}
+
 export function constrainAxis(x0: number, y0: number, x1: number, y1: number, shift: boolean): { x: number; y: number } {
   if (!shift) return { x: x1, y: y1 };
   const dx = Math.abs(x1 - x0);
@@ -211,9 +249,17 @@ export function moveAnnotation(ann: import('./types').Annotation, dx: number, dy
       return { ...ann, x0: ann.x0 + dx, y0: ann.y0 + dy, x1: ann.x1 + dx, y1: ann.y1 + dy };
     case 'equalSpacing':
       return { ...ann, x0: ann.x0 + dx, y0: ann.y0 + dy, x1: ann.x1 + dx, y1: ann.y1 + dy };
+    case 'polygon':
+    case 'polyline':
+      return {
+        ...ann,
+        points: ann.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+      };
     case 'annularSector':
       return { ...ann, cx: ann.cx + dx, cy: ann.cy + dy };
     case 'crossMark':
+    case 'centroidMark':
+    case 'circleMark':
       return { ...ann, x: ann.x + dx, y: ann.y + dy };
     case 'centroidCopy':
       return { ...ann, x: ann.x + dx, y: ann.y + dy };
@@ -223,4 +269,13 @@ export function moveAnnotation(ann: import('./types').Annotation, dx: number, dy
     default:
       return ann;
   }
+}
+
+export function pathVertexAnchor(points: Point[], index: number, closed: boolean): Point {
+  const n = points.length;
+  if (n === 0) return { x: 0, y: 0 };
+  if (closed) return points[(index - 1 + n) % n]!;
+  if (index > 0) return points[index - 1]!;
+  if (n > 1) return points[1]!;
+  return points[0]!;
 }

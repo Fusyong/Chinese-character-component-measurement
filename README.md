@@ -27,7 +27,7 @@ npm run dev
 
 ## 字体笔画
 
-与 PNG 共用同一套组与测量流程；字体图元栅格化为 512×512 透明 PNG（`十-stroke-0.png` 等）。字体文件：[`web/public/fonts/KaiTi_GB2312.ttf`](web/public/fonts/KaiTi_GB2312.ttf)（楷体许可请自行把握是否入库）。
+与 PNG 共用同一套组与测量流程；字体图元栅格化为 512×512 透明 PNG（`十-stroke-0.png` 等）。字体文件：[`web/public/fonts/k.ttf`](web/public/fonts/k.ttf)（楷体许可请自行把握是否入库）。
 
 ## TODO
 

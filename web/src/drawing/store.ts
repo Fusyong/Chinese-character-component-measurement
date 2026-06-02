@@ -12,7 +12,6 @@ export type DrawingState = {
   strokeFillColor: string;
   strokeFillLayer: DrawLayer;
   proportionDividerCount: number;
-  crossMarkSize: number;
   annularInnerR: number;
   annularOuterR: number;
 };
@@ -33,13 +32,12 @@ export const drawingState: DrawingState = {
   strokeFills: [],
   selectedStrokeKeys: new Set(),
   activeTool: 'select',
-  defaultLayer: 'under',
+  defaultLayer: 'middle',
   drawStyle: { color: 'rgb(220, 60, 60)', lineWidth: 2 },
   equalSpacingCount: 3,
   strokeFillColor: 'rgba(255, 107, 107, 0.45)',
   strokeFillLayer: 'top',
   proportionDividerCount: 3,
-  crossMarkSize: 40,
   annularInnerR: 100,
   annularOuterR: 300,
 };
@@ -135,6 +133,37 @@ export function removeStrokeFill(fileKey: string) {
   drawingState.strokeFills.splice(idx, 1);
 }
 
+/** 移除已不在笔画组中的笔画涂色 */
+export function pruneStrokeFills(validFileKeys: ReadonlySet<string>) {
+  const next = drawingState.strokeFills.filter((f) => validFileKeys.has(f.fileKey));
+  if (next.length === drawingState.strokeFills.length) {
+    for (const key of [...drawingState.selectedStrokeKeys]) {
+      if (!validFileKeys.has(key)) drawingState.selectedStrokeKeys.delete(key);
+    }
+    return;
+  }
+  drawingState.strokeFills = next;
+  for (const key of [...drawingState.selectedStrokeKeys]) {
+    if (!validFileKeys.has(key)) drawingState.selectedStrokeKeys.delete(key);
+  }
+}
+
 export function currentDrawStyle(): DrawStyle {
   return { ...drawingState.drawStyle };
+}
+
+/** 各工具新建图示的默认图层 */
+export function defaultLayerForTool(tool: DrawTool): DrawLayer {
+  switch (tool) {
+    case 'rect':
+      return 'bottom';
+    case 'crossMark':
+    case 'centroidMark':
+    case 'copyCentroid':
+      return 'top';
+    case 'circleMark':
+      return 'middle';
+    default:
+      return 'middle';
+  }
 }

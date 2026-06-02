@@ -97,8 +97,26 @@ function hitAnnotation(px: number, py: number, ann: Annotation, width: number): 
       break;
     }
     case 'crossMark':
+    case 'centroidMark':
+    case 'circleMark':
       if (dist(px, py, ann.x, ann.y) < ann.size) return { kind: 'move', annId: ann.id };
       if (nearHandle(px, py, ann.x + ann.size / 2, ann.y)) return { kind: 'handle', annId: ann.id, handle: 'size' };
+      break;
+    case 'polygon':
+    case 'polyline':
+      for (let i = 0; i < ann.points.length; i++) {
+        const pt = ann.points[i]!;
+        if (nearHandle(px, py, pt.x, pt.y)) return { kind: 'handle', annId: ann.id, handle: `v:${i}` };
+      }
+      {
+        const segCount = ann.kind === 'polyline' ? ann.points.length - 1 : ann.points.length;
+        for (let i = 0; i < segCount; i++) {
+          const a = ann.points[i]!;
+          const b = ann.points[(i + 1) % ann.points.length]!;
+          if (ann.kind === 'polygon' && !ann.closed && i === ann.points.length - 1) break;
+          if (pointSegDist(px, py, a.x, a.y, b.x, b.y) < 8) return { kind: 'move', annId: ann.id };
+        }
+      }
       break;
     case 'centroidCopy':
       if (dist(px, py, ann.x, ann.y) < Math.max(ann.rx, ann.ry) + 6) return { kind: 'move', annId: ann.id };

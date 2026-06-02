@@ -1,4 +1,5 @@
-import type { Annotation, DrawStyle, StrokeFillEntry } from './types';
+import type { Annotation, DrawLayer, DrawStyle, StrokeFillEntry } from './types';
+import { polygonAnnotationFilled, rectAnnotationFilled } from './types';
 import { arrowStartTickGeometry, annularHandlePoints, gridUnit } from './geom';
 import { equalSpacingGeometry } from './equalSpacingTemplate';
 import { effectiveProportionRatios, formatGridLength, proportionLabelOffset, proportionSplitPoints, proportionSplitT } from './proportionScale';
@@ -92,20 +93,14 @@ export function renderAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation,
       ctx.lineTo(ann.x1, ann.y1);
       ctx.stroke();
       break;
-    case 'rect': {
-      const x0 = Math.min(ann.x0, ann.x1);
-      const y0 = Math.min(ann.y0, ann.y1);
-      const w = Math.abs(ann.x1 - ann.x0);
-      const h = Math.abs(ann.y1 - ann.y0);
-      ctx.strokeRect(x0 + 0.5, y0 + 0.5, w, h);
-      break;
-    }
+    case 'rect':
     case 'square': {
       const x0 = Math.min(ann.x0, ann.x1);
       const y0 = Math.min(ann.y0, ann.y1);
       const w = Math.abs(ann.x1 - ann.x0);
       const h = Math.abs(ann.y1 - ann.y0);
-      ctx.fillRect(x0, y0, w, h);
+      if (rectAnnotationFilled(ann)) ctx.fillRect(x0, y0, w, h);
+      else ctx.strokeRect(x0 + 0.5, y0 + 0.5, w, h);
       break;
     }
     case 'arrow': {
@@ -115,6 +110,19 @@ export function renderAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation,
       ctx.stroke();
       drawArrowStartTickAndAngle(ctx, ann.x0, ann.y0, ann.x1, ann.y1, ann.style.lineWidth, canvasWidth);
       drawArrowHead(ctx, ann.x0, ann.y0, ann.x1, ann.y1, ann.style.lineWidth);
+      break;
+    }
+    case 'polygon':
+    case 'polyline': {
+      if (ann.points.length < 2) break;
+      ctx.beginPath();
+      ctx.moveTo(ann.points[0]!.x, ann.points[0]!.y);
+      for (let i = 1; i < ann.points.length; i++) {
+        ctx.lineTo(ann.points[i]!.x, ann.points[i]!.y);
+      }
+      if (ann.kind === 'polygon' && ann.closed) ctx.closePath();
+      if (ann.kind === 'polygon' && polygonAnnotationFilled(ann)) ctx.fill();
+      else ctx.stroke();
       break;
     }
     case 'equalSpacing': {
@@ -209,6 +217,30 @@ export function renderAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation,
       ctx.stroke();
       break;
     }
+    case 'centroidMark': {
+      const rx = ann.size / 2;
+      const ry = ann.size / 2;
+      ctx.beginPath();
+      ctx.ellipse(ann.x, ann.y, rx, ry, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      const margin = Math.max(1, ann.style.lineWidth * 0.9);
+      const hx = Math.max(2, rx - margin);
+      const hy = Math.max(2, ry - margin);
+      ctx.beginPath();
+      ctx.moveTo(ann.x - hx, ann.y);
+      ctx.lineTo(ann.x + hx, ann.y);
+      ctx.moveTo(ann.x, ann.y - hy);
+      ctx.lineTo(ann.x, ann.y + hy);
+      ctx.stroke();
+      break;
+    }
+    case 'circleMark': {
+      const r = ann.size / 2;
+      ctx.beginPath();
+      ctx.arc(ann.x, ann.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    }
     case 'centroidCopy': {
       ctx.strokeStyle = ann.color;
       ctx.beginPath();
@@ -242,7 +274,7 @@ export function renderAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation,
 export function renderAnnotations(
   ctx: CanvasRenderingContext2D,
   annotations: Annotation[],
-  layer: 'under' | 'top',
+  layer: DrawLayer,
   canvasWidth: number,
   selectedIds: Set<string>
 ) {
@@ -266,7 +298,7 @@ function parseFillRgba(css: string): { r: number; g: number; b: number; a: numbe
 export function renderStrokeFills(
   ctx: CanvasRenderingContext2D,
   fills: StrokeFillEntry[],
-  layer: 'under' | 'top',
+  layer: DrawLayer,
   width: number,
   height: number,
   masks: Map<string, Uint8Array>
@@ -291,6 +323,49 @@ export function renderStrokeFills(
   }
 
   ctx.putImageData(id, 0, 0);
+}
+
+export function renderPathDraft(
+  ctx: CanvasRenderingContext2D,
+  points: { x: number; y: number }[],
+  cursor: { x: number; y: number } | null,
+  style: DrawStyle,
+  options?: { closePreview?: boolean; fillPreview?: boolean }
+) {
+  if (points.length === 0) return;
+  ctx.save();
+  applyStyle(ctx, style);
+  ctx.beginPath();
+  ctx.moveTo(points[0]!.x, points[0]!.y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i]!.x, points[i]!.y);
+  }
+  if (cursor) ctx.lineTo(cursor.x, cursor.y);
+  if (options?.fillPreview && options.closePreview && points.length >= 3) {
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    ctx.stroke();
+  }
+  if (options?.closePreview && points.length >= 3 && !options.fillPreview) {
+    ctx.setLineDash([6, 4]);
+    ctx.globalAlpha = 0.45;
+    ctx.beginPath();
+    ctx.moveTo(cursor ? cursor.x : points[points.length - 1]!.x, cursor ? cursor.y : points[points.length - 1]!.y);
+    ctx.lineTo(points[0]!.x, points[0]!.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** @deprecated use renderPathDraft */
+export function renderPolygonDraft(
+  ctx: CanvasRenderingContext2D,
+  points: { x: number; y: number }[],
+  cursor: { x: number; y: number } | null,
+  style: DrawStyle
+) {
+  renderPathDraft(ctx, points, cursor, style, { closePreview: true });
 }
 
 export function renderSelectionHandles(ctx: CanvasRenderingContext2D, ann: Annotation, canvasWidth: number) {
@@ -326,7 +401,13 @@ export function renderSelectionHandles(ctx: CanvasRenderingContext2D, ann: Annot
       dot(ann.x0, ann.y0);
       dot(ann.x1, ann.y1);
       break;
+    case 'polygon':
+    case 'polyline':
+      for (const pt of ann.points) dot(pt.x, pt.y);
+      break;
     case 'crossMark':
+    case 'centroidMark':
+    case 'circleMark':
       dot(ann.x + ann.size / 2, ann.y);
       break;
     case 'annularSector': {

@@ -1,3 +1,4 @@
+import type { GuideGridKind } from './guideGrid';
 import type { GroupResult, Metrics } from './types';
 import type { MergedMask } from './mask';
 import type { OverlayOpts, OverlayStyle } from './render';
@@ -83,8 +84,9 @@ export function renderGuideLayer(
   gctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  style: OverlayStyle
+  style: OverlayStyle,
+  gridKind: GuideGridKind = 'tian'
 ) {
   clearCanvas(gctx, width, height);
-  renderGuidesUnderlay(gctx, width, height, style);
+  renderGuidesUnderlay(gctx, width, height, style, gridKind);
 }

@@ -457,6 +457,10 @@ canvas.layerCanvas {
   pointer-events: none;
 }
 
+canvas.layerCanvas.layerBottom {
+  z-index: -1;
+}
+
 canvas.layerCanvas.layer0 {
   z-index: 0;
 }

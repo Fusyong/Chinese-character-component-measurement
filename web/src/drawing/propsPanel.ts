@@ -1,7 +1,9 @@
 import { gridUnit } from './geom';
+import { rememberToolPresetFromAnnotation, rememberToolPresetFromStrokeFill } from './toolPresets';
 import { equalProportionRatios } from './proportionScale';
 import { beginEdit, drawingState, patchStrokeFill, removeStrokeFill, updateAnnotation } from './store';
 import type { Annotation, DrawLayer, StrokeFillEntry } from './types';
+import { DRAW_LAYER_OPTIONS, STROKE_LAYER_OPTIONS, polygonAnnotationFilled, rectAnnotationFilled } from './types';
 
 export type PropsPanelOptions = {
   getCanvasWidth: () => number;
@@ -50,19 +52,37 @@ function decodeAttr(s: string): string {
   return s.replace(/&quot;/g, '"').replace(/&amp;/g, '&');
 }
 
-const KIND_LABEL: Record<Annotation['kind'], string> = {
+const KIND_LABEL: Partial<Record<Annotation['kind'], string>> = {
   line: '直线',
-  rect: '方框',
-  square: '方块',
+  rect: '方形',
+  square: '方形',
   arrow: '箭头',
+  polygon: '多边形',
+  polyline: '折线',
   equalSpacing: '等距线',
   proportionScale: '比例尺',
   annularSector: '扇形',
   crossMark: '十字',
-  centroidCopy: '重心',
+  centroidMark: '重心',
+  circleMark: '圆圈',
+  centroidCopy: '复制重心',
   bboxCopy: '外接框',
   bodyBBoxCopy: '主体框',
 };
+
+function filledRow(id: string, checked: boolean) {
+  return `<div class="row propRow"><label for="${id}">填色</label><input class="propInput" id="${id}" type="checkbox"${checked ? ' checked' : ''} /></div>`;
+}
+
+function annotationKindTitle(ann: Annotation): string {
+  if (ann.kind === 'rect' || ann.kind === 'square') {
+    return rectAnnotationFilled(ann) ? '方形' : '方框';
+  }
+  if (ann.kind === 'polygon') {
+    return polygonAnnotationFilled(ann) ? '多边形' : '多边形框';
+  }
+  return KIND_LABEL[ann.kind] ?? ann.kind;
+}
 
 function frameCopyProps(ann: import('./types').FrameCopyAnnotation, p: string) {
   return (
@@ -73,10 +93,7 @@ function frameCopyProps(ann: import('./types').FrameCopyAnnotation, p: string) {
     num(`${p}-y1`, '角2 Y', ann.y1) +
     colorRow(`${p}-cc`, '标记色', ann.color) +
     num(`${p}-lw`, '线宽', ann.style.lineWidth, 0.5, 0.5, 12) +
-    sel(`${p}-layer`, '图层', ann.layer, [
-      { v: 'under', t: '默认（字下）' },
-      { v: 'top', t: '上层' },
-    ])
+    sel(`${p}-layer`, '图层', ann.layer, DRAW_LAYER_OPTIONS)
   );
 }
 
@@ -103,17 +120,14 @@ function styleBlock(ann: Annotation, prefix: string) {
   return (
     colorRow(`${prefix}-color`, '颜色', ann.style.color) +
     num(`${prefix}-lw`, '线宽', ann.style.lineWidth, 0.5, 0.5, 12) +
-    sel(`${prefix}-layer`, '图层', ann.layer, [
-      { v: 'under', t: '默认（字下）' },
-      { v: 'top', t: '上层' },
-    ])
+    sel(`${prefix}-layer`, '图层', ann.layer, DRAW_LAYER_OPTIONS)
   );
 }
 
 function htmlForAnnotation(ann: Annotation, canvasW: number): string {
   const gu = gridUnit(canvasW);
   const p = `ann-${ann.id.slice(0, 8)}`;
-  let body = `<div class="propKind">${KIND_LABEL[ann.kind]}</div>` + styleBlock(ann, p);
+  let body = `<div class="propKind">${annotationKindTitle(ann)}</div>` + styleBlock(ann, p);
 
   switch (ann.kind) {
     case 'line':
@@ -128,8 +142,16 @@ function htmlForAnnotation(ann: Annotation, canvasW: number): string {
         body += `<div class="propHint">长度 ≈ ${Math.round((len / gu) * 10) / 10}（格宽=100）</div>`;
       }
       break;
+    case 'polygon':
+      body += filledRow(`${p}-filled`, polygonAnnotationFilled(ann));
+      body += `<div class="propHint">${ann.points.length} 个顶点（拖拽控制点调整）</div>`;
+      break;
+    case 'polyline':
+      body += `<div class="propHint">${ann.points.length} 个顶点（拖拽控制点调整）</div>`;
+      break;
     case 'rect':
     case 'square':
+      body += filledRow(`${p}-filled`, rectAnnotationFilled(ann));
       body +=
         num(`${p}-x0`, '角1 X', ann.x0) +
         num(`${p}-y0`, '角1 Y', ann.y0) +
@@ -166,6 +188,8 @@ function htmlForAnnotation(ann: Annotation, canvasW: number): string {
         num(`${p}-a1`, '结束角°', (ann.a1 * 180) / Math.PI, 1);
       break;
     case 'crossMark':
+    case 'centroidMark':
+    case 'circleMark':
       body += num(`${p}-x`, '中心 X', ann.x) + num(`${p}-y`, '中心 Y', ann.y) + num(`${p}-size`, '大小', ann.size, 1, 4, 200);
       break;
     case 'centroidCopy':
@@ -177,10 +201,7 @@ function htmlForAnnotation(ann: Annotation, canvasW: number): string {
         num(`${p}-ry`, '椭圆 ry', ann.ry, 0.5, 1) +
         colorRow(`${p}-cc`, '标记色', ann.color) +
         num(`${p}-lw`, '线宽', ann.style.lineWidth, 0.5, 0.5, 12) +
-        sel(`${p}-layer`, '图层', ann.layer, [
-          { v: 'under', t: '默认（字下）' },
-          { v: 'top', t: '上层' },
-        ]);
+        sel(`${p}-layer`, '图层', ann.layer, DRAW_LAYER_OPTIONS);
       break;
     case 'bboxCopy':
     case 'bodyBBoxCopy':
@@ -201,10 +222,7 @@ function strokeColorRow(fileKey: string, label: string, css: string): string {
 
 function strokeLayerRow(fileKey: string, layer: DrawLayer): string {
   const id = strokeFieldId(fileKey, 'layer');
-  const opts = [
-    { v: 'under', t: '默认（字下）' },
-    { v: 'top', t: '上层' },
-  ]
+  const opts = STROKE_LAYER_OPTIONS
     .map((o) => `<option value="${o.v}"${o.v === layer ? ' selected' : ''}>${o.t}</option>`)
     .join('');
   return (
@@ -220,6 +238,8 @@ function applyStrokeFillFromForm(fileKey: string) {
   const layerEl = document.getElementById(strokeFieldId(fileKey, 'layer')) as HTMLSelectElement | null;
   if (!colorEl || !layerEl) return;
   patchStrokeFill(fileKey, fill.groupId, rgbaFromHex(colorEl.value, alphaFromCss(fill.color)), layerEl.value as DrawLayer);
+  const updated = drawingState.strokeFills.find((f) => f.fileKey === fileKey);
+  if (updated) rememberToolPresetFromStrokeFill(updated);
 }
 
 function htmlForStrokeFill(fill: StrokeFillEntry, label: string): string {
@@ -249,6 +269,11 @@ function applyStyleFromForm(annId: string, prefix: string) {
   updateAnnotation(annId, { style: { color, lineWidth }, layer });
 }
 
+function readCheckbox(id: string): boolean {
+  const el = document.getElementById(id) as HTMLInputElement | null;
+  return el?.checked ?? false;
+}
+
 function applyAnnotationFromForm(ann: Annotation) {
   const p = `ann-${ann.id.slice(0, 8)}`;
   applyStyleFromForm(ann.id, p);
@@ -273,10 +298,17 @@ function applyAnnotationFromForm(ann: Annotation) {
     case 'rect':
     case 'square':
       updateAnnotation(ann.id, {
+        kind: 'rect',
+        filled: readCheckbox(`${p}-filled`),
         x0: readNum(`${p}-x0`),
         y0: readNum(`${p}-y0`),
         x1: readNum(`${p}-x1`),
         y1: readNum(`${p}-y1`),
+      });
+      break;
+    case 'polygon':
+      updateAnnotation(ann.id, {
+        filled: readCheckbox(`${p}-filled`),
       });
       break;
     case 'equalSpacing':
@@ -313,6 +345,8 @@ function applyAnnotationFromForm(ann: Annotation) {
       });
       break;
     case 'crossMark':
+    case 'centroidMark':
+    case 'circleMark':
       updateAnnotation(ann.id, {
         x: readNum(`${p}-x`),
         y: readNum(`${p}-y`),
@@ -347,6 +381,9 @@ function applyAnnotationFromForm(ann: Annotation) {
       break;
     }
   }
+
+  const updated = drawingState.annotations.find((a) => a.id === ann.id);
+  if (updated) rememberToolPresetFromAnnotation(updated);
 }
 
 export function mountPropsPanel(container: HTMLElement, opts: PropsPanelOptions): () => void {
