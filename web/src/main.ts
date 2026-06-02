@@ -168,7 +168,7 @@ if (!appEl) throw new Error('Missing #app');
 appEl.innerHTML = `
   <div class="app">
     <div class="panel compact" id="leftPanel">
-      <h2>笔画分组</h2>
+      <h2 class="sectionTitle">笔画分组</h2>
       <p class="sectionHint">可混用 PNG 图像和汉字拆出笔画</p>
       <div class="sourceStrip">
         <div class="row fontRow">
@@ -181,70 +181,67 @@ appEl.innerHTML = `
         </div>
       </div>
       <div id="groupList"></div>
-      <div class="btns">
+      <div class="btns btnsCompact">
         <button id="addGroup">添加组</button>
       </div>
 
-      <h2 style="margin-top:14px">阈值（仅在无透明时生效）</h2>
-
-      <div class="row">
-        <label>二值阈值</label>
-        <div><small id="thrVal"></small></div>
+      <h2 class="sectionTitle">阈值</h2>
+      <p class="sectionHint sectionHintTight">仅在无透明 PNG 时生效</p>
+      <div class="row rowSlider">
+        <label for="thr">二值阈值</label>
+        <small id="thrVal" class="valTag"></small>
+        <input id="thr" type="range" min="0" max="255" step="1" />
       </div>
-      <input id="thr" type="range" min="0" max="255" step="1" />
-
-      <div class="row">
-        <label>反相（把黑当 1）</label>
+      <div class="row rowCheck">
+        <label for="invert">反相</label>
         <input id="invert" type="checkbox" />
       </div>
 
-      <h2 style="margin-top:14px">主体范围</h2>
-      <div class="row">
-        <label>主体比例</label>
-        <div><small id="ratioVal"></small></div>
+      <h2 class="sectionTitle">主体范围</h2>
+      <div class="row rowSlider">
+        <label for="ratio">主体比例</label>
+        <small id="ratioVal" class="valTag"></small>
+        <input id="ratio" type="range" min="0.5" max="0.99" step="0.01" />
       </div>
-      <input id="ratio" type="range" min="0.5" max="0.99" step="0.01" />
-
-      <div class="row">
-        <label>主体范围算法</label>
+      <div class="row rowSelect">
+        <label for="bodyMethod">算法</label>
         <select id="bodyMethod">
-          <option value="quantile1d">快速（1D 分位裁剪）</option>
-          <option value="integral2d">更接近最小矩形（降采样 2D 搜索）</option>
+          <option value="quantile1d">快速（1D 分位）</option>
+          <option value="integral2d">最小矩形（2D 搜索）</option>
         </select>
       </div>
 
-      <h2 style="margin-top:14px">显示</h2>
-      <div class="row">
-        <label>标记透明度</label>
-        <div><small id="alphaVal"></small></div>
+      <h2 class="sectionTitle">显示</h2>
+      <div class="row rowSlider">
+        <label for="alpha">标记透明度</label>
+        <small id="alphaVal" class="valTag"></small>
+        <input id="alpha" type="range" min="0.05" max="1" step="0.01" />
       </div>
-      <input id="alpha" type="range" min="0.05" max="1" step="0.01" />
-
-      <div class="row">
-        <label>线条粗细</label>
-        <div><small id="lwVal"></small></div>
+      <div class="row rowSlider">
+        <label for="lw">线条粗细</label>
+        <small id="lwVal" class="valTag"></small>
+        <input id="lw" type="range" min="1" max="6" step="0.5" />
       </div>
-      <input id="lw" type="range" min="1" max="6" step="0.5" />
-
-      <div class="row">
-        <label>重心圆面积比例</label>
-        <div><small id="ckVal"></small></div>
+      <div class="row rowSlider">
+        <label for="ck">重心圆比例</label>
+        <small id="ckVal" class="valTag"></small>
+        <input id="ck" type="range" min="0" max="0.08" step="0.001" />
       </div>
-      <input id="ck" type="range" min="0" max="0.08" step="0.001" />
+      <div class="row rowCheck"><label for="showOverallOverlays">整体标记</label><input id="showOverallOverlays" type="checkbox" /></div>
+      <div class="row rowCheck"><label for="showGroupOverlays">组标记</label><input id="showGroupOverlays" type="checkbox" /></div>
+      <div class="row rowCheck"><label for="showContours">轮廓</label><input id="showContours" type="checkbox" /></div>
+      <div class="row rowSlider">
+        <label for="eps">轮廓简化 ε</label>
+        <small id="epsVal" class="valTag"></small>
+        <input id="eps" type="range" min="0" max="8" step="0.5" />
+      </div>
+      <div class="row rowCheck"><label for="showBBox">外接框</label><input id="showBBox" type="checkbox" /></div>
+      <div class="row rowCheck"><label for="showBodyBBox">主体框</label><input id="showBodyBBox" type="checkbox" /></div>
+      <div class="row rowCheck"><label for="showCentroid">重心</label><input id="showCentroid" type="checkbox" /></div>
 
-      <div class="row"><label>显示整体标记</label><input id="showOverallOverlays" type="checkbox" /></div>
-      <div class="row"><label>显示组标记</label><input id="showGroupOverlays" type="checkbox" /></div>
-      <div class="row"><label>轮廓</label><input id="showContours" type="checkbox" /></div>
-      <div class="row"><label>轮廓简化 ε（像素）</label><div><small id="epsVal"></small></div></div>
-      <input id="eps" type="range" min="0" max="8" step="0.5" />
-
-      <div class="row"><label>外接框 bbox</label><input id="showBBox" type="checkbox" /></div>
-      <div class="row"><label>主体框 body bbox</label><input id="showBodyBBox" type="checkbox" /></div>
-      <div class="row"><label>重心</label><input id="showCentroid" type="checkbox" /></div>
-
-      <div class="btns">
-        <button id="exportJSON" disabled>导出 metrics.json</button>
-        <button id="exportPNG" disabled>导出标注图 PNG</button>
+      <div class="btns btnsCompact">
+        <button id="exportJSON" disabled>导出 JSON</button>
+        <button id="exportPNG" disabled>导出 PNG</button>
         <button id="clear" class="danger">清空</button>
       </div>
       <div class="warn" id="warn"></div>

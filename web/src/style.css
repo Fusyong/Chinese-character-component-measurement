@@ -7,6 +7,10 @@
   --muted: rgba(255, 255, 255, 0.7);
   --accent: #7aa2ff;
   --danger: #ff6b6b;
+  --side-panel-w: 360px;
+  --workspace-max: 800px;
+  --app-pad: 12px;
+  --app-gap: 12px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -39,11 +43,22 @@ body {
 }
 
 .app {
-  display: grid;
-  grid-template-columns: 320px 1fr 360px;
-  gap: 12px;
-  padding: 12px;
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: flex-start;
+  gap: var(--app-gap);
+  padding: var(--app-pad);
   height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.app > .panel {
+  flex: 0 0 var(--side-panel-w);
+  width: var(--side-panel-w);
+  max-height: 100%;
+  min-height: 0;
 }
 
 .panel {
@@ -55,7 +70,163 @@ body {
 }
 
 .panel.compact {
-  padding: 10px;
+  padding: 8px;
+}
+
+#leftPanel.panel.compact {
+  padding: 8px 8px 10px;
+}
+
+#leftPanel .sectionTitle {
+  margin: 8px 0 3px;
+  font-size: 12px;
+}
+
+#leftPanel .sectionTitle:first-child {
+  margin-top: 0;
+}
+
+#leftPanel .sectionHint {
+  margin: 0 0 5px;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+#leftPanel .sectionHintTight {
+  margin-top: -2px;
+  margin-bottom: 4px;
+}
+
+#leftPanel .row {
+  margin: 2px 0;
+  gap: 4px 6px;
+}
+
+#leftPanel .row.rowSlider {
+  grid-template-columns: auto 2.5em minmax(0, 1fr);
+  align-items: center;
+}
+
+#leftPanel .row.rowSelect {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+#leftPanel .row.rowCheck {
+  grid-template-columns: 1fr auto;
+}
+
+#leftPanel .row > label {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+#leftPanel .valTag {
+  font-size: 10px;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+
+#leftPanel input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  height: 18px;
+}
+
+#leftPanel select {
+  width: 100%;
+  min-width: 0;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
+#leftPanel .sourceStrip {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+}
+
+#leftPanel .fontRow {
+  margin: 2px 0;
+  gap: 6px;
+}
+
+#leftPanel .fontCharInput {
+  font-size: 14px;
+  padding: 3px 5px;
+}
+
+#leftPanel .strokePool {
+  margin-top: 6px;
+}
+
+#leftPanel .fontStrokeSummary {
+  margin: 4px 0 4px;
+  font-size: 10px;
+}
+
+#leftPanel .fontStrokeGrid {
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+#leftPanel .groupCard {
+  padding: 5px 6px;
+  margin-bottom: 5px;
+  border-radius: 8px;
+}
+
+#leftPanel .groupHeader {
+  gap: 4px;
+  font-size: 11px;
+}
+
+#leftPanel .groupHeader small {
+  font-size: 10px;
+}
+
+#leftPanel .groupHeader button {
+  padding: 2px 5px;
+  font-size: 10px;
+  border-radius: 6px;
+}
+
+#leftPanel .groupItemList {
+  margin: 4px 0 0;
+}
+
+#leftPanel .groupItem,
+#leftPanel .groupItemEmpty {
+  padding: 2px 0;
+  gap: 4px;
+}
+
+#leftPanel .groupAddRow,
+#leftPanel .groupStrokePick {
+  margin-top: 4px;
+  gap: 4px;
+}
+
+#leftPanel .miniLabel {
+  font-size: 10px;
+}
+
+#leftPanel .btnsCompact {
+  margin-top: 5px;
+  gap: 4px;
+}
+
+#leftPanel .btnsCompact button {
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+#leftPanel .warn {
+  margin-top: 6px;
+  font-size: 11px;
 }
 
 .panel h2 {
@@ -419,11 +590,17 @@ button:disabled {
 .canvasWrap {
   position: relative;
   overflow: hidden;
-  width: 100%;
+  flex: 0 0 auto;
+  min-width: 0;
+  /* 逻辑 800×800；可缩小；不放大；宽度随视口在左右栏之间自适应 */
+  width: min(
+    var(--workspace-max),
+    calc(100vw - 2 * var(--side-panel-w) - 2 * var(--app-gap) - 2 * var(--app-pad))
+  );
+  max-width: var(--workspace-max);
   aspect-ratio: 1 / 1;
-  max-height: 100%;
-  align-self: start;
-  justify-self: center;
+  max-height: min(var(--workspace-max), 100%);
+  height: auto;
 }
 
 .canvasBar {
